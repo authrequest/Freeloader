@@ -1,0 +1,44 @@
+# ── Secrets / local machine config (NEVER COMMIT) ─────────────────────────
+# .mcp.json here contained a plaintext SSH password — keep it out of git.
+.mcp.json
+*.env
+.env
+.env.*
+*.pem
+*_rsa
+*_ed25519
+id_*
+
+# ── Copyrighted Plex binaries (do NOT redistribute) ───────────────────────
+/Plex_Media_Server
+/Plex Media Server
+libsoci_core.so
+# All shared objects: the Plex libs above + our build output (users build it).
+*.so
+
+# ── IDA Pro databases (huge, derived from the copyrighted binary) ─────────
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.idb.*
+
+# ── Build artifacts / toolchains ──────────────────────────────────────────
+linux/build/
+linux/toolchain/
+build/
+*.o
+*.obj
+*.a
+
+# ── OS / editor cruft ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/

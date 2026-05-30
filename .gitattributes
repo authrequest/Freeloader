@@ -1,0 +1,9 @@
+# Linux-targeted project: keep everything LF in the repo and on checkout.
+# The /bin/sh + python launchers MUST stay LF or they break on the Plex host.
+* text=auto eol=lf
+*.sh  text eol=lf
+*.py  text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.c   text eol=lf
+*.h   text eol=lf

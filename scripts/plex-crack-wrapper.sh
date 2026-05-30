@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Launcher for plexmediaserver that LD_PRELOADs the (musl-built) crack into the
 # Plex Media Server process only. LD_PRELOAD must NOT be set via the unit's
 # Environment= because ExecStart is run by /bin/sh (glibc) first, and a musl .so

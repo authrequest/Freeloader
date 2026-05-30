@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Build plexmediaserver_crack.so for Plex Media Server on Linux.
 #
 # IMPORTANT: Plex ships and runs against its OWN bundled musl libc + libgcompat

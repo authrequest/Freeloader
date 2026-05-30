@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Verifier: reads the live Plex process to confirm the crack installed.
 #   arg1 = PID of "Plex Media Server"
 # Checks:

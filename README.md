@@ -58,3 +58,11 @@ The copyrighted Plex binaries (`Plex Media Server`, `libsoci_core.so`) and the
 IDA Pro databases (`*.i64`, `*.id0`, …) are intentionally **git-ignored** — they
 are large and not ours to distribute. Point your own analysis tools at your own
 Plex install.
+
+## License
+
+[GNU AGPL-3.0-or-later](LICENSE) © the Plex_Patch authors. Each source file
+carries an `SPDX-License-Identifier: AGPL-3.0-or-later` tag.
+
+The vendored Zydis disassembler in `third_party/zydis/` is **MIT**-licensed
+(see `third_party/zydis/README.md`); its terms are preserved and unaffected.

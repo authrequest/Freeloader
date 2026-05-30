@@ -20,7 +20,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 ZIG_VERSION="0.13.0"
 TARGET="x86_64-linux-musl"
-OUT="plexmediaserver_crack.so"
+OUT="build/plexmediaserver_crack.so"
 
 echo "=== Plex Media Server Crack - Linux (musl) Build ==="
 
@@ -44,22 +44,23 @@ fi
 echo "Using zig: ${ZIG} ($("${ZIG}" version))"
 
 # Required sources.
-for f in hook.cpp hook.hpp main.cpp Zydis.c Zydis.h; do
+for f in src/hook.cpp src/hook.hpp src/main.cpp third_party/zydis/Zydis.c third_party/zydis/Zydis.h; do
     [ -f "$f" ] || { echo "ERROR: missing $f"; exit 1; }
 done
 
-CFLAGS=(-target "${TARGET}" -O2 -fPIC -I.)
-CXXFLAGS=(-target "${TARGET}" -std=c++20 -O2 -fPIC -I.)
+CFLAGS=(-target "${TARGET}" -O2 -fPIC -I src -I third_party/zydis)
+CXXFLAGS=(-target "${TARGET}" -std=c++20 -O2 -fPIC -I src -I third_party/zydis)
 
+mkdir -p build
 echo "=== compiling Zydis.c (C) ==="
-"${ZIG}" cc  "${CFLAGS[@]}"   -c Zydis.c -o build_Zydis.o
+"${ZIG}" cc  "${CFLAGS[@]}"   -c third_party/zydis/Zydis.c -o build/Zydis.o
 echo "=== compiling hook.cpp (C++) ==="
-"${ZIG}" c++ "${CXXFLAGS[@]}" -c hook.cpp -o build_hook.o
+"${ZIG}" c++ "${CXXFLAGS[@]}" -c src/hook.cpp -o build/hook.o
 echo "=== compiling main.cpp (C++) ==="
-"${ZIG}" c++ "${CXXFLAGS[@]}" -c main.cpp -o build_main.o
+"${ZIG}" c++ "${CXXFLAGS[@]}" -c src/main.cpp -o build/main.o
 echo "=== linking ${OUT} ==="
-"${ZIG}" c++ -target "${TARGET}" -shared -o "${OUT}" build_main.o build_hook.o build_Zydis.o
-rm -f build_Zydis.o build_hook.o build_main.o
+"${ZIG}" c++ -target "${TARGET}" -shared -o "${OUT}" build/main.o build/hook.o build/Zydis.o
+rm -f build/Zydis.o build/hook.o build/main.o
 
 echo ""
 echo "=== ABI sanity check (external symbols must all be musl libc) ==="
@@ -78,8 +79,8 @@ cat <<'EOF'
 Install (proper method -- LD_PRELOAD, no patchelf):
 
 1. Copy the artifacts to the Plex host:
-     plexmediaserver_crack.so  -> /usr/lib/plexmediaserver/lib/
-     plex-crack-wrapper.sh     -> /usr/local/bin/   (chmod 755)
+     build/plexmediaserver_crack.so  -> /usr/lib/plexmediaserver/lib/plexmediaserver_crack.so
+     scripts/plex-crack-wrapper.sh   -> /usr/local/bin/   (chmod 755)
 
 2. Add a systemd drop-in that swaps ExecStart for the wrapper (the wrapper sets
    LD_PRELOAD *after* /bin/sh starts, so only the musl Plex process is preloaded

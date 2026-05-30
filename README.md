@@ -14,7 +14,7 @@ of its feature bitset on, unlocking all gated features.
 - Plex's feature gates read a single in-memory table, `g_feature_bitset_slots`
   (14 × `uint64`), populated from the MyPlex feature list. A feature with
   internal code `C` is "available" iff `slots[C >> 3] & (1 << (C & 7))`.
-- The patch (`linux/`) is a small shared library whose constructor finds
+- The patch (`src/`) is a small shared library whose constructor finds
   `FeatureManager_apply_feature_list_xml`, installs a trampoline, and forces all
   14 slots to `0xFF…FF` after Plex applies its feature list — so every feature
   (including Plex Pass, code 92) reads as enabled.
@@ -30,25 +30,26 @@ Two non-obvious requirements make or break this on a real install:
    `LD_PRELOAD` only for the Plex `exec`, and the library `unsetenv`s it so
    Plex's glibc helper children are unaffected.
 
-Full build + install + uninstall instructions: **[`linux/README.md`](linux/README.md)**.
+Full build + install + uninstall instructions: **[`docs/BUILD.md`](docs/BUILD.md)**.
 
 ## Quick start
 
 ```bash
-cd linux
-bash build.sh          # produces plexmediaserver_crack.so (musl), prints install steps
+bash build.sh          # -> build/plexmediaserver_crack.so (musl); prints install steps
 ```
 
 ## Repository layout
 
 | Path | What |
 |------|------|
-| `linux/hook.cpp` / `hook.hpp` | hooking engine: `/proc`-free module discovery (`dl_iterate_phdr`), signature scan, trampoline, feature logic, full feature-UUID catalog |
-| `linux/main.cpp` | library constructor (`unsetenv` + `hook()`) |
-| `linux/plex-crack-wrapper.sh` | systemd `ExecStart` launcher that scopes `LD_PRELOAD` to the Plex process |
-| `linux/readbitset.py` | verifier: dumps the live feature bitset from a running PMS |
-| `linux/build.sh` | musl build via `zig` (auto-downloaded) with an ABI sanity gate |
-| `linux/Zydis.{c,h}` | vendored [Zydis](https://github.com/zyantific/zydis) disassembler (MIT) |
+| `src/hook.cpp` / `hook.hpp` | hooking engine: `dl_iterate_phdr` module discovery, signature scan, trampoline, feature logic, full feature-UUID catalog |
+| `src/main.cpp` | library constructor (`unsetenv` + `hook()`) |
+| `scripts/plex-crack-wrapper.sh` | systemd `ExecStart` launcher that scopes `LD_PRELOAD` to the Plex process |
+| `scripts/readbitset.py` | verifier: dumps the live feature bitset from a running PMS |
+| `build.sh` | musl build via `zig` (auto-downloaded) with an ABI sanity gate |
+| `third_party/zydis/` | vendored [Zydis](https://github.com/zyantific/zydis) disassembler (MIT) |
+| `docs/BUILD.md` | full build / install / uninstall guide |
+| `experimental/debug_hook.c` | standalone alternate hook (legacy signature) |
 | `AGENTS.md` | architecture / RE notes |
 
 ## Not in this repo (by design)

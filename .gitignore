@@ -1,22 +1,21 @@
-# ── Secrets / local machine config (NEVER COMMIT) ─────────────────────────
-# .mcp.json here contained a plaintext SSH password — keep it out of git.
+# ─── Secrets / local machine config (NEVER COMMIT) ───────────────────────
+# .mcp.json here held a plaintext SSH password — keep all local creds out.
 .mcp.json
-*.env
 .env
 .env.*
 *.pem
+*.key
 *_rsa
-*_ed25519
-id_*
+*_rsa.pub
+id_ed25519*
+id_rsa*
 
-# ── Copyrighted Plex binaries (do NOT redistribute) ───────────────────────
+# ─── Copyrighted Plex binaries (do NOT redistribute) ─────────────────────
 /Plex_Media_Server
 /Plex Media Server
 libsoci_core.so
-# All shared objects: the Plex libs above + our build output (users build it).
-*.so
 
-# ── IDA Pro databases (huge, derived from the copyrighted binary) ─────────
+# ─── IDA Pro databases (large; derived from the copyrighted binary) ──────
 *.i64
 *.idb
 *.id0
@@ -24,21 +23,52 @@ libsoci_core.so
 *.id2
 *.nam
 *.til
-*.idb.*
 
-# ── Build artifacts / toolchains ──────────────────────────────────────────
-linux/build/
-linux/toolchain/
-build/
+# ─── Compiled output (from github/gitignore: C++) ────────────────────────
 *.o
 *.obj
+*.lo
+*.slo
+*.gch
+*.pch
+*.d
 *.a
+*.la
+*.lai
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.out
+*.app
+*.exe
 
-# ── OS / editor cruft ──────────────────────────────────────────────────────
+# ─── Build dirs / generated ───────────────────────────────────────────────
+build/
+Build/
+build-*/
+dist/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+
+# ─── Toolchain auto-downloaded by build.sh ────────────────────────────────
+toolchain/
+
+# ─── Temp / logs ──────────────────────────────────────────────────────────
+*.tmp
+*.log
+*.bak
+*.swp
+*~
+.cache/
+
+# ─── OS / editor cruft ────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
-*.swp
-*~
 .idea/
 .vscode/

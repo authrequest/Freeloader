@@ -29,11 +29,10 @@ already on `PATH`, or pass `ZIG=/path/to/zig`). No cmake/g++/glibc toolchain nee
 ## Build
 
 ```bash
-cd linux
 bash build.sh
 ```
 
-Output: `plexmediaserver_crack.so` (a musl shared object). The script runs an ABI
+Output: `build/plexmediaserver_crack.so` (a musl shared object). The script runs an ABI
 sanity check and refuses to emit a `.so` that references any glibc-only symbol.
 It prints the install steps below on success.
 
@@ -47,8 +46,8 @@ unaffected.
 
 ```bash
 # 1. Place the artifacts on the Plex host:
-install -o plex -g plex -m644 plexmediaserver_crack.so /usr/lib/plexmediaserver/lib/
-install -m755 plex-crack-wrapper.sh /usr/local/bin/
+install -o plex -g plex -m644 build/plexmediaserver_crack.so /usr/lib/plexmediaserver/lib/
+install -m755 scripts/plex-crack-wrapper.sh /usr/local/bin/
 
 # 2. Drop-in that swaps ExecStart for the wrapper:
 mkdir -p /etc/systemd/system/plexmediaserver.service.d
@@ -70,7 +69,7 @@ PID=$(systemctl show -p MainPID --value plexmediaserver)
 grep -F plexmediaserver_crack.so /proc/$PID/maps
 ```
 
-`readbitset.py <pid>` (root) dumps the live feature bitset; all 14 slots should
+`scripts/readbitset.py <pid>` (root) dumps the live feature bitset; all 14 slots should
 read `0xffffffffffffffff` when the hook is active.
 
 ## Uninstall
@@ -99,7 +98,7 @@ systemctl reset-failed plexmediaserver && systemctl restart plexmediaserver
 
 - x86-64 Linux only.
 - "Godmode": enables ALL features regardless of GUID. The full feature UUID
-  catalog is in `hook.cpp` (`kFeatureGuidCatalog`) for reference.
+  catalog is in `src/hook.cpp` (`kFeatureGuidCatalog`) for reference.
 - Signature patterns in `hook()` are version-specific; you may need to re-verify
   them after a PMS update.
 - Docker (linuxserver/plex) note: the same `LD_PRELOAD`-only-on-the-PMS-exec

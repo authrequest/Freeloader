@@ -58,6 +58,18 @@ compile_commands.json
 # ─── Toolchain auto-downloaded by build.sh ────────────────────────────────
 toolchain/
 
+# ─── Python (plex_relay / scripts/plex-tailnet) ───────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.tox/
+
 # ─── Temp / logs ──────────────────────────────────────────────────────────
 *.tmp
 *.log

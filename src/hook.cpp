@@ -70,7 +70,7 @@ struct FeatureGuidEntry
 	{"d49a726d-ef0e-4a04-9ffb-fd018306d3b7", 42, 5, 0x04, nullptr},
 	{"0eee866d-782b-4dfd-b42b-3bbe8eb0af16", 43, 5, 0x08, "server-manager"},
 	{"1417df52-986e-4e4b-8dcd-3997fbc5c976", 44, 5, 0x10, "collections"},
-	{"4264b94c-cb40-4935-83b4-7b5c49d35e7f", 45, 5, 0x20, nullptr},
+	{"4264b94c-cb40-4935-83b4-7b5c49d35e7f", 45, 5, 0x20, "remote_watch_pass"}, // g_feature_bits_remote_media&0x20; gates remote playback/download (FeatureManager_matches_client_policy)
 	{"88aba3a3-bd62-42a5-91bb-0558a4c1db57", 46, 5, 0x40, nullptr},
 	{"c7ae6f8f-05e6-48bb-9024-c05c1dc3c43e", 47, 5, 0x80, "kevin-bacon"},
 	{"b58d7f28-7b4a-49bb-97a7-152645505f28", 48, 6, 0x01, "item_clusters"},

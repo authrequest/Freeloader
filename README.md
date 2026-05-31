@@ -81,6 +81,7 @@ shared shell library. See **[`scripts/plex-tailnet/README.md`](scripts/plex-tail
 | `windows/` | Windows x64 DLL injector + godmode patch (see its README) |
 | `third_party/zydis/` | vendored [Zydis](https://github.com/zyantific/zydis) disassembler (MIT) |
 | `docs/BUILD.md` | full build / install / uninstall guide |
+| `docs/WINDOWS.md` | top-level Windows x64 patching/build index |
 | `experimental/debug_hook.c` | standalone alternate hook (legacy signature) |
 | `AGENTS.md` | architecture / RE notes |
 

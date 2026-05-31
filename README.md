@@ -78,6 +78,7 @@ shared shell library. See **[`scripts/plex-tailnet/README.md`](scripts/plex-tail
 | `scripts/readbitset.py` | verifier: dumps the live feature bitset from a running PMS |
 | `scripts/plex-tailnet/` | Tailscale/Headscale remote-access setup (see its README) |
 | `plex_relay/` | Python reimplementation of Plex's `RelayController` (see its README) |
+| `windows/` | Windows x64 DLL injector + godmode patch (see its README) |
 | `third_party/zydis/` | vendored [Zydis](https://github.com/zyantific/zydis) disassembler (MIT) |
 | `docs/BUILD.md` | full build / install / uninstall guide |
 | `experimental/debug_hook.c` | standalone alternate hook (legacy signature) |

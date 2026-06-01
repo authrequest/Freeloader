@@ -1,0 +1,76 @@
+# .dockerignore — keep the Docker build context small.
+#
+# Both docker/Dockerfile.* only need: build.sh, src/, third_party/.
+# Everything else is excluded so the daemon doesn't ship big/unrelated
+# files into the buildkit context.
+
+# VCS / secrets
+.git
+.gitattributes
+.mcp.json
+.env
+.env.*
+
+# Build outputs and toolchain
+build/
+Build/
+build-*/
+dist/
+toolchain/
+compile_commands.json
+
+# Compiled artifacts
+*.o
+*.obj
+*.lo
+*.a
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+*.out
+
+# Plex binaries / IDA DBs
+libsoci_core.so
+Plex_Media_Server
+*.i64
+*.idb
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# Subprojects not part of the build
+windows/
+plex_relay/
+experimental/
+scripts/
+docs/
+
+# Docs and meta
+AGENTS.md
+README.md
+LICENSE
+.gitattributes
+
+# Python cruft
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.cache/
+*.tmp
+*.log
+*.bak
+*.swp

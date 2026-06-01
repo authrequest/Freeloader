@@ -16,6 +16,7 @@ x86-64** — covering both *feature unlocking* and *remote access*.
 | 1 | **Feature-unlock patch** | `src/`, `build.sh` | `LD_PRELOAD` shared library that forces every `FeatureManager` bit on |
 | 2 | **Relay RE + model** | `plex_relay/` | Reverse-engineered, runnable reimplementation of Plex's `RelayController` |
 | 3 | **Remote access (no patch)** | `scripts/plex-tailnet/` | Reach your server over Tailscale/Headscale instead of Plex Relay |
+| 4 | **Docker support** | `docker/`, [`docs/DOCKER.md`](docs/DOCKER.md) | Patched `plexinc/pms-docker` / `lscr.io/linuxserver/plex` images (multi-stage build) **and** in-place patcher for a running container (`plex-docker-patch.sh`) |
 
 Each subsystem has its own README; this page is the map.
 
@@ -65,6 +66,26 @@ address. Includes an idempotent setup script (security questionnaire, firewall
 lockdown, health check), an optional self-hosted Headscale installer, and a
 shared shell library. See **[`scripts/plex-tailnet/README.md`](scripts/plex-tailnet/README.md)**.
 
+## 4 · Docker support — `docker/`
+
+Same `LD_PRELOAD`-on-the-PMS-exec patch, packaged for the two popular Plex
+container images. Two flows are supported:
+
+- **Rebuild a patched image** — multi-stage Dockerfiles (`Dockerfile.plexinc`,
+  `Dockerfile.linuxserver`) build the musl `.so` with `zig`, layer it onto
+  the upstream image, and replace the s6 `svc-plex` `run` file. Best for
+  repeat deploys and CI/CD.
+- **Patch a running container in place** — `plex-docker-patch.sh` modifies
+  the live container's filesystem (`.so`, wrapper, s6 `run` file) and
+  restarts it. No image rebuild, original image untouched, fully
+  revertible. Best for one-off patching of a container you don't want
+  to touch.
+
+The wrapper sets `LD_PRELOAD` *last* and the `.so`'s constructor `unsetenv`s
+it, so glibc helper children (Tuner, Script Host, transcoders) are unaffected.
+See **[`docker/README.md`](docker/README.md)** and the full guide
+**[`docs/DOCKER.md`](docs/DOCKER.md)**.
+
 ---
 
 ## Repository layout
@@ -79,8 +100,10 @@ shared shell library. See **[`scripts/plex-tailnet/README.md`](scripts/plex-tail
 | `scripts/plex-tailnet/` | Tailscale/Headscale remote-access setup (see its README) |
 | `plex_relay/` | Python reimplementation of Plex's `RelayController` (see its README) |
 | `windows/` | Windows x64 DLL injector + godmode patch (see its README) |
+| `docker/` | patched `plexinc/pms-docker` + `lscr.io/linuxserver/plex` images + in-place patcher for running containers (see its README) |
 | `third_party/zydis/` | vendored [Zydis](https://github.com/zyantific/zydis) disassembler (MIT) |
-| `docs/BUILD.md` | full build / install / uninstall guide |
+| `docs/BUILD.md` | native Linux build / install / uninstall guide |
+| `docs/DOCKER.md` | Docker build / run / verify / uninstall / troubleshooting guide |
 | `docs/WINDOWS.md` | top-level Windows x64 patching/build index |
 | `experimental/debug_hook.c` | standalone alternate hook (legacy signature) |
 | `AGENTS.md` | architecture / RE notes |

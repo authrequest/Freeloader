@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+#
+# Patch plexinc/pms-docker with the feature-unlock shared library.
+#
+#   docker build -f docker/Dockerfile.plexinc -t plex-crack:plexinc .
+#   docker run -d --name plex --network=host \
+#     -v /srv/plex/config:/config -v /srv/plex/data:/data \
+#     plex-crack:plexinc
+#
+# Two stages:
+#   1. builder   -- zig 0.13.0 cross-compile plexmediaserver_crack.so (musl)
+#   2. runtime   -- layer it onto plexinc/pms-docker + override the s6 plex
+#                  service so PMS is exec'd with LD_PRELOAD=...crack.so.
+#                  The .so's constructor (src/main.cpp) calls unsetenv, so
+#                  PMS's glibc helper children (Tuner, Script Host) are
+#                  unaffected.
+#
+# Patch invariants are enforced at build time (RUN sanity): the upstream
+# layout must match what the wrapper assumes. If plexinc/pms-docker
+# restructures, the build fails here rather than the container failing
+# mysteriously at runtime.
+
+# ── Stage 1: build the musl .so ────────────────────────────────────────────
+FROM debian:bookworm-slim AS builder
+
+ARG ZIG_VERSION=0.13.0
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Toolchain layer (cached across source-only changes).
+RUN mkdir -p /src/toolchain \
+ && curl -fsSL \
+      "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+      -o /tmp/zig.tar.xz \
+ && tar -C /src/toolchain --strip-components=1 -xf /tmp/zig.tar.xz \
+ && rm /tmp/zig.tar.xz
+ENV PATH="/src/toolchain:${PATH}"
+
+# Build sources. The .dockerignore at the repo root whitelists these.
+COPY build.sh ./
+COPY src ./src
+COPY third_party ./third_party
+RUN bash build.sh
+# build.sh writes /src/build/plexmediaserver_crack.so (musl).
+
+# ── Stage 2: runtime -- patch plexinc/pms-docker ──────────────────────────
+ARG PLEX_BASE_IMAGE=plexinc/pms-docker:latest
+FROM ${PLEX_BASE_IMAGE} AS runtime
+
+ARG PLEX_BASE_IMAGE
+ARG PATCH_VERSION=dev
+LABEL org.opencontainers.image.title="plexmediaserver-crack (plexinc)" \
+      org.opencontainers.image.source="https://github.com/authrequest/Freeloader" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      plex_patch.base="${PLEX_BASE_IMAGE}" \
+      plex_patch.version="${PATCH_VERSION}"
+
+# Sanity: refuse to build on an unfamiliar upstream layout.
+RUN set -eux; \
+    PMS="/usr/lib/plexmediaserver/Plex Media Server"; \
+    PMS_LIB="/usr/lib/plexmediaserver/lib"; \
+    RUN_SCRIPT="/etc/s6-overlay/s6-rc.d/svc-plex/run"; \
+    [ -x "${PMS}" ]        || { echo "patcher: missing ${PMS} in ${PLEX_BASE_IMAGE}"; exit 1; }; \
+    [ -d "${PMS_LIB}" ]    || { echo "patcher: missing ${PMS_LIB}/ in ${PLEX_BASE_IMAGE}"; exit 1; }; \
+    [ -f "${RUN_SCRIPT}" ] || { echo "patcher: missing ${RUN_SCRIPT} in ${PLEX_BASE_IMAGE}"; exit 1; }
+
+# Drop the .so and the in-container launcher.
+COPY --from=builder /src/build/plexmediaserver_crack.so \
+                    /usr/lib/plexmediaserver/lib/plexmediaserver_crack.so
+COPY docker/wrapper.sh /usr/lib/plexmediaserver/plex-crack-wrapper.sh
+RUN chmod 0755 /usr/lib/plexmediaserver/plex-crack-wrapper.sh
+
+# Override the s6 plex service run file. The original is kept as .orig for
+# forensics / downgrade (rebuild against the unpatched image to revert).
+# plexinc's upstream service already runs as the 'plex' user, so we do not
+# add s6-setuidgid here -- LSIO is the image that needs it (see its Dockerfile).
+RUN set -eux; \
+    RUN_SCRIPT="/etc/s6-overlay/s6-rc.d/svc-plex/run"; \
+    cp "${RUN_SCRIPT}" "${RUN_SCRIPT}.orig"; \
+    cat > "${RUN_SCRIPT}" <<'EOF'
+#!/bin/sh
+exec /usr/lib/plexmediaserver/plex-crack-wrapper.sh
+EOF
+    chmod 0755 "${RUN_SCRIPT}"

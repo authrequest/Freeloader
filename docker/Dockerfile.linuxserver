@@ -1,0 +1,83 @@
+# syntax=docker/dockerfile:1.7
+#
+# Patch lscr.io/linuxserver/plex with the feature-unlock shared library.
+#
+#   docker build -f docker/Dockerfile.linuxserver -t plex-crack:lsio .
+#   docker run -d --name plex --network=host \
+#     -e PUID=$(id -u) -e PGID=$(id -g) \
+#     -v /srv/plex/config:/config -v /srv/plex/data:/data \
+#     plex-crack:lsio
+#
+# Two stages (mirrors Dockerfile.plexinc):
+#   1. builder   -- zig cross-compile plexmediaserver_crack.so (musl)
+#   2. runtime   -- layer onto lscr.io/linuxserver/plex + override the s6 plex
+#                  service so PMS is exec'd (as user 'abc' via s6-setuidgid,
+#                  preserving LSIO's permission model) with LD_PRELOAD.
+#
+# Why s6-setuidgid is preserved: LSIO's run file drops to the 'abc' user
+# (uid 911) before exec'ing the PMS binary. If we don't keep that, PMS
+# would run as root, which (a) breaks LSIO's permission model, (b) prevents
+# writes to /config and /data which are chowned to abc on first start,
+# (c) makes the container harder to use (root-owned media library).
+
+# ── Stage 1: build the musl .so (identical to plexinc) ────────────────────
+FROM debian:bookworm-slim AS builder
+
+ARG ZIG_VERSION=0.13.0
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN mkdir -p /src/toolchain \
+ && curl -fsSL \
+      "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+      -o /tmp/zig.tar.xz \
+ && tar -C /src/toolchain --strip-components=1 -xf /tmp/zig.tar.xz \
+ && rm /tmp/zig.tar.xz
+ENV PATH="/src/toolchain:${PATH}"
+
+COPY build.sh ./
+COPY src ./src
+COPY third_party ./third_party
+RUN bash build.sh
+
+# ── Stage 2: runtime -- patch lscr.io/linuxserver/plex ────────────────────
+ARG PLEX_BASE_IMAGE=lscr.io/linuxserver/plex:latest
+FROM ${PLEX_BASE_IMAGE} AS runtime
+
+ARG PLEX_BASE_IMAGE
+ARG PATCH_VERSION=dev
+LABEL org.opencontainers.image.title="plexmediaserver-crack (linuxserver)" \
+      org.opencontainers.image.source="https://github.com/authrequest/Freeloader" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      plex_patch.base="${PLEX_BASE_IMAGE}" \
+      plex_patch.version="${PATCH_VERSION}"
+
+# Sanity: refuse to build on an unfamiliar upstream layout.
+RUN set -eux; \
+    PMS="/usr/lib/plexmediaserver/Plex Media Server"; \
+    PMS_LIB="/usr/lib/plexmediaserver/lib"; \
+    RUN_SCRIPT="/etc/s6-overlay/s6-rc.d/svc-plex/run"; \
+    [ -x "${PMS}" ]        || { echo "patcher: missing ${PMS} in ${PLEX_BASE_IMAGE}"; exit 1; }; \
+    [ -d "${PMS_LIB}" ]    || { echo "patcher: missing ${PMS_LIB}/ in ${PLEX_BASE_IMAGE}"; exit 1; }; \
+    [ -f "${RUN_SCRIPT}" ] || { echo "patcher: missing ${RUN_SCRIPT} in ${PLEX_BASE_IMAGE}"; exit 1; }
+
+COPY --from=builder /src/build/plexmediaserver_crack.so \
+                    /usr/lib/plexmediaserver/lib/plexmediaserver_crack.so
+COPY docker/wrapper.sh /usr/lib/plexmediaserver/plex-crack-wrapper.sh
+RUN chmod 0755 /usr/lib/plexmediaserver/plex-crack-wrapper.sh
+
+# Override the s6 plex service run file. We preserve LSIO's s6-setuidgid
+# abc so PMS still runs as user 'abc' (uid 911) -- otherwise /config and
+# /data would be created as root and break the LSIO permission model.
+RUN set -eux; \
+    RUN_SCRIPT="/etc/s6-overlay/s6-rc.d/svc-plex/run"; \
+    cp "${RUN_SCRIPT}" "${RUN_SCRIPT}.orig"; \
+    cat > "${RUN_SCRIPT}" <<'EOF'
+#!/bin/sh
+exec s6-setuidgid abc /usr/lib/plexmediaserver/plex-crack-wrapper.sh
+EOF
+    chmod 0755 "${RUN_SCRIPT}"

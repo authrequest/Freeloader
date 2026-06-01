@@ -101,8 +101,7 @@ systemctl reset-failed plexmediaserver && systemctl restart plexmediaserver
   catalog is in `src/hook.cpp` (`kFeatureGuidCatalog`) for reference.
 - Signature patterns in `hook()` are version-specific; you may need to re-verify
   them after a PMS update.
-- Docker (linuxserver/plex) note: the same `LD_PRELOAD`-only-on-the-PMS-exec
-  principle applies, but the container's launch path differs (s6) — apply the
-  preload to the PMS process, not the container-wide environment, to avoid
-  breaking glibc init/helpers. The native systemd method above is what is tested.
+- For Docker (`plexinc/pms-docker`, `lscr.io/linuxserver/plex`), see
+  [`DOCKER.md`](DOCKER.md) — same `LD_PRELOAD`-on-the-PMS-exec principle,
+  but the s6 service plumbing is different per image.
 - For intro/credit detection: Settings -> Library -> Marker source -> "local detection only".

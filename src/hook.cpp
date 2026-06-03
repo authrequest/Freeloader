@@ -248,13 +248,28 @@ std::optional<uintptr_t> create_hook(uintptr_t from, uintptr_t to)
 	*reinterpret_cast<uintptr_t*>(&shellcode[6]) = from + offset;
 	std::memcpy(trampoline_mem + offset, shellcode, sizeof(shellcode));
 	const size_t trampoline_size = offset + sizeof(shellcode);
-	mprotect(reinterpret_cast<void*>(trampoline_mem), trampoline_size, PROT_READ|PROT_EXEC);
+	if(mprotect(reinterpret_cast<void*>(trampoline_mem), trampoline_size, PROT_READ|PROT_EXEC) != 0)
+	{
+		munmap(trampoline_mem, getpagesize());
+		return std::nullopt;
+	}
 
 	// Jump to target code
 	*reinterpret_cast<uintptr_t*>(&shellcode[6]) = to;
-	mprotect(reinterpret_cast<void*>(from), sizeof(shellcode), PROT_READ|PROT_WRITE|PROT_EXEC);
-	memcpy(reinterpret_cast<void*>(from), shellcode, sizeof(shellcode));
-	mprotect(reinterpret_cast<void*>(from), sizeof(shellcode), PROT_READ|PROT_EXEC);
+	if(mprotect(reinterpret_cast<void*>(from), sizeof(shellcode), PROT_READ|PROT_WRITE|PROT_EXEC) != 0)
+	{
+		munmap(trampoline_mem, getpagesize());
+		return std::nullopt;
+	}
+
+	std::memcpy(reinterpret_cast<void*>(from), shellcode, sizeof(shellcode));
+
+	if(mprotect(reinterpret_cast<void*>(from), sizeof(shellcode), PROT_READ|PROT_EXEC) != 0)
+	{
+		// Memory is still RWX (suboptimal but not fatal -- PMS stays running).
+		// Do not munmap -- the hook already wrote its jmp, and PMS is running
+		// with a partially enforced protection; the trampoline is still reachable.
+	}
 
 	return reinterpret_cast<uintptr_t>(trampoline_mem);
 }

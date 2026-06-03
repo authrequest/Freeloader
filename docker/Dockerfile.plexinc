@@ -20,6 +20,9 @@
 # restructures, the build fails here rather than the container failing
 # mysteriously at runtime.
 
+# ── Build args (global -- visible to every FROM) ──────────────────────────
+ARG PLEX_BASE_IMAGE=plexinc/pms-docker:latest
+
 # ── Stage 1: build the musl .so ────────────────────────────────────────────
 FROM debian:bookworm-slim AS builder
 
@@ -49,7 +52,6 @@ RUN bash build.sh
 # build.sh writes /src/build/plexmediaserver_crack.so (musl).
 
 # ── Stage 2: runtime -- patch plexinc/pms-docker ──────────────────────────
-ARG PLEX_BASE_IMAGE=plexinc/pms-docker:latest
 FROM ${PLEX_BASE_IMAGE} AS runtime
 
 ARG PLEX_BASE_IMAGE

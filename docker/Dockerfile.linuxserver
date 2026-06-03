@@ -20,6 +20,9 @@
 # writes to /config and /data which are chowned to abc on first start,
 # (c) makes the container harder to use (root-owned media library).
 
+# ── Build args (global -- visible to every FROM) ──────────────────────────
+ARG PLEX_BASE_IMAGE=lscr.io/linuxserver/plex:latest
+
 # ── Stage 1: build the musl .so (identical to plexinc) ────────────────────
 FROM debian:bookworm-slim AS builder
 
@@ -45,7 +48,6 @@ COPY third_party ./third_party
 RUN bash build.sh
 
 # ── Stage 2: runtime -- patch lscr.io/linuxserver/plex ────────────────────
-ARG PLEX_BASE_IMAGE=lscr.io/linuxserver/plex:latest
 FROM ${PLEX_BASE_IMAGE} AS runtime
 
 ARG PLEX_BASE_IMAGE

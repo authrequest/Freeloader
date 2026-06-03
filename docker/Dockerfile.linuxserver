@@ -76,8 +76,6 @@ RUN chmod 0755 /usr/lib/plexmediaserver/plex-crack-wrapper.sh
 RUN set -eux; \
     RUN_SCRIPT="/etc/s6-overlay/s6-rc.d/svc-plex/run"; \
     cp "${RUN_SCRIPT}" "${RUN_SCRIPT}.orig"; \
-    cat > "${RUN_SCRIPT}" <<'EOF'
-#!/bin/sh
-exec s6-setuidgid abc /usr/lib/plexmediaserver/plex-crack-wrapper.sh
-EOF
+    printf '#!/bin/sh\nexec s6-setuidgid abc /usr/lib/plexmediaserver/plex-crack-wrapper.sh\n' \
+        > "${RUN_SCRIPT}"; \
     chmod 0755 "${RUN_SCRIPT}"

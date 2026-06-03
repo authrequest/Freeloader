@@ -333,7 +333,7 @@ build_so() {
 write_new_run_file() {
     local base="$1" out="$2"
     {
-        printf '#!/bin/sh\n'
+        printf '#!/usr/bin/with-contenv bash\n'
         if [ "${base}" = "linuxserver" ]; then
             printf 'exec s6-setuidgid abc %s\n' "${WRAPPER_PATH_INSIDE}"
         else

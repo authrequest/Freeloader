@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "hook.hpp"
 
-#include <cstdlib>
+#include <stdlib.h>
 
 __attribute__((constructor)) void init_so()
 {

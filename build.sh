@@ -7,8 +7,14 @@
 # A glibc-built .so will NOT load into Plex -- the dynamic loader fails to
 # relocate glibc-only symbols (__isoc23_strtol, arc4random, *_chk, _dl_find_object)
 # and Plex exits 127. We therefore cross-compile against musl with zig, which
-# bundles musl + libc++ and statically links the C++ runtime, leaving only musl
-# libc references that Plex's bundled libc.so satisfies.
+# bundles musl for clean cross-compilation.
+#
+# IMPORTANT: The .so must NOT statically link libc++ or libc++abi. Plex's
+# runtime uses GCC's libstdc++ for C++ exception handling. If our .so defines
+# __cxa_throw/__cxa_begin_catch/__gxx_personality_v0 (from libc++abi), they
+# override libstdc++'s versions via LD_PRELOAD, breaking boost::filesystem
+# exception handling and crashing Plex. We use -nostdlib++ and strip all C++
+# runtime usage from the source to avoid this entirely.
 #
 # Injection is done with LD_PRELOAD (NOT patchelf): patchelf rewrites the 22MB
 # BIND_NOW/PIE binary's program headers in a way musl's loader cannot tolerate,
@@ -50,7 +56,7 @@ for f in src/hook.cpp src/hook.hpp src/main.cpp third_party/zydis/Zydis.c third_
 done
 
 CFLAGS=(-target "${TARGET}" -O2 -fPIC -I src -I third_party/zydis)
-CXXFLAGS=(-target "${TARGET}" -std=c++20 -O2 -fPIC -I src -I third_party/zydis)
+CXXFLAGS=(-target "${TARGET}" -std=c++20 -O2 -fPIC -fno-exceptions -fno-rtti -nostdlib++ -I src -I third_party/zydis)
 
 mkdir -p build
 echo "=== compiling Zydis.c (C) ==="
@@ -60,7 +66,7 @@ echo "=== compiling hook.cpp (C++) ==="
 echo "=== compiling main.cpp (C++) ==="
 "${ZIG}" c++ "${CXXFLAGS[@]}" -c src/main.cpp -o build/main.o
 echo "=== linking ${OUT} ==="
-"${ZIG}" c++ -target "${TARGET}" -shared -o "${OUT}" build/main.o build/hook.o build/Zydis.o
+"${ZIG}" c++ -target "${TARGET}" -nostdlib++ -shared -o "${OUT}" build/main.o build/hook.o build/Zydis.o
 rm -f build/Zydis.o build/hook.o build/main.o
 
 echo ""

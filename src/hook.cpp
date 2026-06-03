@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "hook.hpp"
 
-#include <vector>
-#include <iostream>
+#include <string.h>
+#include <stdlib.h>
 #include <link.h>
-#include <cstring>
-#include <sstream>
-// #include <unordered_map> // No longer needed - Godmode approach
-#include <bitset>
 #include <unistd.h>
 #include <sys/mman.h>
 #include "Zydis.h"
@@ -140,32 +136,28 @@ struct FeatureGuidEntry
 
 [[maybe_unused]] static constexpr size_t kFeatureGuidCatalogCount = sizeof(kFeatureGuidCatalog) / sizeof(kFeatureGuidCatalog[0]);
 
-std::bitset<896>* g_feature_flags;
-auto _is_feature_available = reinterpret_cast<decltype(&hook_is_feature_available)>(0);
-auto _map_find = reinterpret_cast<decltype(&hook_map_find)>(0);
-auto _bitset_init = reinterpret_cast<decltype(&hook_bitset_init)>(0);
-auto _is_user_feature_set = reinterpret_cast<decltype(&hook_is_user_feature_set)>(0);
+static uint64_t (*g_feature_flags)[14] = nullptr;
 
-// Returns the runtime [start, end) of the main program's executable code.
-//
-// Replaces the old /proc/self/maps + "Plex Media Server" + "r-xp" string scrape.
-// dl_iterate_phdr reports the loaded ELF objects directly: the first object it
-// visits is always the main program, and its PT_LOAD entries carry the exact
-// runtime load bias (dlpi_addr) plus per-segment flags. We merge every
-// executable (PF_X) PT_LOAD into one span. This is immune to the mapped file's
-// pathname (wrappers/symlinks/renames) and to the code being split across more
-// than one executable load segment, neither of which the maps heuristic handled.
-std::optional<std::tuple<uintptr_t, uintptr_t>> get_dottext_info()
+// Trampoline pointers (thunks to the original functions).
+static uint64_t (*_bitset_init)(uintptr_t) = nullptr;
+static uint64_t (*_is_feature_available)(uintptr_t, const char**) = nullptr;
+static uint64_t* (*_map_find)(uintptr_t*, const char**) = nullptr;
+static bool (*_is_user_feature_set)(uintptr_t, int, int) = nullptr;
+
+// Returns the runtime [start, end) of the main program's executable code
+// using dl_iterate_phdr. The first object visited is always the main program;
+// we merge every executable (PF_X) PT_LOAD into one span.
+TextSpan get_dottext_info()
 {
 	struct ExecSpan
 	{
-		uintptr_t start = UINTPTR_MAX;
-		uintptr_t end = 0;
-	} span;
+		uintptr_t start;
+		uintptr_t end;
+	} span = {UINTPTR_MAX, 0};
 
-	const auto collect = [](dl_phdr_info* info, size_t, void* data) -> int
+	dl_iterate_phdr([](dl_phdr_info* info, size_t, void* data) -> int
 	{
-		auto* out = reinterpret_cast<ExecSpan*>(data);
+		auto* out = static_cast<ExecSpan*>(data);
 
 		for(int i = 0; i < info->dlpi_phnum; i++)
 		{
@@ -176,48 +168,34 @@ std::optional<std::tuple<uintptr_t, uintptr_t>> get_dottext_info()
 				const uintptr_t seg_start = info->dlpi_addr + phdr.p_vaddr;
 				const uintptr_t seg_end = seg_start + phdr.p_memsz;
 
-				if(seg_start < out->start)
-				{
-					out->start = seg_start;
-				}
-
-				if(seg_end > out->end)
-				{
-					out->end = seg_end;
-				}
+				if(seg_start < out->start) out->start = seg_start;
+				if(seg_end > out->end)    out->end   = seg_end;
 			}
 		}
 
-		// The first object dl_iterate_phdr reports is the main program; we only
-		// want its executable text, so stop after the first callback.
+		// First object only = main program.
 		return 1;
-	};
-
-	dl_iterate_phdr(collect, &span);
+	}, &span);
 
 	if(span.end <= span.start)
 	{
-		return std::nullopt;
+		return {false, 0, 0};
 	}
 
-	return std::make_tuple(span.start, span.end);
+	return {true, span.start, span.end};
 }
 
-std::optional<uintptr_t> create_hook(uintptr_t from, uintptr_t to)
+OptAddr create_hook(uintptr_t from, uintptr_t to)
 {
 	ZydisDecoder decoder;
 	ZydisDecodedInstruction instruction;
 	ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
 
-	// Map the trampoline read/write only, then flip to read/exec after the
-	// prologue + jump are written (see mprotect below). Requesting RWX up front
-	// is rejected on W^X-hardened kernels (SELinux execmem, grsec/PaX), and
-	// MAP_PRIVATE is the correct backing for an anonymous trampoline page.
-	auto trampoline_mem = reinterpret_cast<uint8_t*>(mmap(NULL, getpagesize(), PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0));
-	
+	auto trampoline_mem = static_cast<uint8_t*>(mmap(nullptr, getpagesize(), PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0));
+
 	if(trampoline_mem == MAP_FAILED)
 	{
-		return std::nullopt;
+		return {false, 0};
 	}
 
 	size_t offset = 0;
@@ -226,15 +204,13 @@ std::optional<uintptr_t> create_hook(uintptr_t from, uintptr_t to)
 	{
 		if(ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&decoder, nullptr, reinterpret_cast<void*>(from + offset), ZYDIS_MAX_INSTRUCTION_LENGTH, &instruction)))
 		{
-			std::memcpy(trampoline_mem + offset, reinterpret_cast<uintptr_t*>(from + offset), instruction.length);
+			memcpy(trampoline_mem + offset, reinterpret_cast<void*>(from + offset), instruction.length);
 			offset += instruction.length;
 		}
-		
 		else
 		{
 			munmap(trampoline_mem, getpagesize());
-
-			return std::nullopt;
+			return {false, 0};
 		}
 	}
 
@@ -246,87 +222,90 @@ std::optional<uintptr_t> create_hook(uintptr_t from, uintptr_t to)
 
 	// Jump to original code in trampoline and make trampoline executable
 	*reinterpret_cast<uintptr_t*>(&shellcode[6]) = from + offset;
-	std::memcpy(trampoline_mem + offset, shellcode, sizeof(shellcode));
+	memcpy(trampoline_mem + offset, shellcode, sizeof(shellcode));
 	const size_t trampoline_size = offset + sizeof(shellcode);
-	if(mprotect(reinterpret_cast<void*>(trampoline_mem), trampoline_size, PROT_READ|PROT_EXEC) != 0)
+
+	if(mprotect(trampoline_mem, trampoline_size, PROT_READ|PROT_EXEC) != 0)
 	{
 		munmap(trampoline_mem, getpagesize());
-		return std::nullopt;
+		return {false, 0};
 	}
 
 	// Jump to target code
 	*reinterpret_cast<uintptr_t*>(&shellcode[6]) = to;
+
 	if(mprotect(reinterpret_cast<void*>(from), sizeof(shellcode), PROT_READ|PROT_WRITE|PROT_EXEC) != 0)
 	{
 		munmap(trampoline_mem, getpagesize());
-		return std::nullopt;
+		return {false, 0};
 	}
 
-	std::memcpy(reinterpret_cast<void*>(from), shellcode, sizeof(shellcode));
+	memcpy(reinterpret_cast<void*>(from), shellcode, sizeof(shellcode));
 
 	if(mprotect(reinterpret_cast<void*>(from), sizeof(shellcode), PROT_READ|PROT_EXEC) != 0)
 	{
-		// Memory is still RWX (suboptimal but not fatal -- PMS stays running).
-		// Do not munmap -- the hook already wrote its jmp, and PMS is running
-		// with a partially enforced protection; the trampoline is still reachable.
+		// Memory is still RWX (suboptimal but not fatal).
 	}
 
-	return reinterpret_cast<uintptr_t>(trampoline_mem);
+	return {true, reinterpret_cast<uintptr_t>(trampoline_mem)};
 }
 
-std::optional<uintptr_t> sig_scan(const uintptr_t start, const uintptr_t end, std::string_view pattern)
+OptAddr sig_scan(uintptr_t start, uintptr_t end, const char* pattern)
 {
-	constexpr const uint16_t WILDCARD = 0xFFFF;
-	std::vector<uint16_t> pattern_vec;
-	
-	for(uintptr_t i = 0; i < pattern.length(); i++)
+	static constexpr uint16_t WILDCARD = 0xFFFF;
+	static constexpr size_t MAX_PAT = 128;
+
+	uint16_t pat[MAX_PAT];
+	size_t   pat_count = 0;
+	size_t   i = 0;
+	size_t   len = strlen(pattern);
+
+	while(i < len && pat_count < MAX_PAT)
 	{
 		if(pattern[i] == ' ')
 		{
+			i++;
 			continue;
 		}
 
 		if(pattern[i] == '?')
 		{
-			if(pattern[i + 1] == '?')
-			{
-				i++;
-			}
-
-			pattern_vec.push_back(WILDCARD);
-
+			pat[pat_count++] = WILDCARD;
+			if(i + 1 < len && pattern[i + 1] == '?') i++;
+			i++;
 			continue;
 		}
 
-		pattern_vec.push_back(static_cast<uint16_t>(std::strtol(&pattern[i], nullptr, 16)));
-		i++;
+		char hex[3] = {pattern[i], i + 1 < len ? pattern[i + 1] : '\0', '\0'};
+		pat[pat_count++] = static_cast<uint16_t>(strtol(hex, nullptr, 16));
+		i += 2;
 	}
 
-	const auto vec_length = pattern_vec.size();
+	if(pat_count == 0 || pat_count > end - start)
+	{
+		return {false, 0};
+	}
 
-	for(uintptr_t i = start; i <= end - vec_length; i++)
+	for(uintptr_t addr = start; addr <= end - pat_count; addr++)
 	{
 		bool mismatch = false;
 
-		for(uintptr_t x = 0; x < vec_length; x++)
+		for(size_t x = 0; x < pat_count; x++)
 		{
-			const auto mem = *reinterpret_cast<uint8_t*>(i + x);
-
-			if(pattern_vec[x] != WILDCARD && mem != pattern_vec[x])
+			if(pat[x] != WILDCARD && *reinterpret_cast<const uint8_t*>(addr + x) != static_cast<uint8_t>(pat[x]))
 			{
 				mismatch = true;
-
 				break;
 			}
 		}
 
 		if(!mismatch)
 		{
-			return i;
+			return {true, addr};
 		}
 	}
 
-	return std::nullopt;
+	return {false, 0};
 }
 
 uintptr_t follow_call_rel32(const uintptr_t address)
@@ -366,7 +345,14 @@ uint64_t* hook_map_find(uintptr_t* rcx, const char** str)
 uint64_t hook_bitset_init(uintptr_t rcx)
 {
 	auto ret = _bitset_init(rcx);
-	g_feature_flags->set();
+
+	if(g_feature_flags)
+	{
+		for(int i = 0; i < 14; i++)
+		{
+			(*g_feature_flags)[i] = UINT64_MAX;
+		}
+	}
 
 	return ret;
 }
@@ -379,74 +365,56 @@ bool hook_is_user_feature_set([[maybe_unused]] uintptr_t rcx, [[maybe_unused]] i
 void hook()
 {
 	auto info = get_dottext_info();
-	
-	if(!info)
+
+	if(!info.ok)
 	{
 		return;
 	}
 
-	const auto start = std::get<0>(info.value());
-	const auto end = std::get<1>(info.value());
+	const uintptr_t start = info.start;
+	const uintptr_t end = info.end;
 
-	// Modern path (PMS BETA 2024/08/13+): every feature flag lives in a single
-	// boost::atomic<std::bitset> backed by g_feature_bitset_slots, an array of
-	// 14 x uint64 at .bss 0x15AE5D8. A feature with internal code C occupies
-	// slots[C >> 3], bit (1 << (C & 7)) -- i.e. only the low 8 bits of each qword
-	// are used, so 14 qwords cover codes 0..111. The real loader
-	// (FeatureManager_apply_feature_list_xml) fills these from the MyPlex
-	// /api/v2/features list; we hook its tail and force every bit on.
-	//
-	// The bitset MUST span all 14 qwords (896 bits). The old 704-bit size only
-	// covered slots 0..10 (codes 0..87) and silently left Plex Pass (code 92,
-	// slot 11) plus the other high-code subscription features (88..110:
-	// radio, federated-auth, tuner-sharing, premium_music_metadata, music_videos,
-	// music-analysis, ...) disabled. This path supersedes the per-call feature
-	// hooks, so resolve it first and skip the legacy path on success.
-	if(const auto bitset = sig_scan(start, end, "48 8D 0D ? ? ? ? 48 8B 94 05 90 FE FF FF"); bitset)
+	// Modern path (PMS BETA 2024/08/13+): force the entire feature bitset.
+	if(const auto bitset = sig_scan(start, end, "48 8D 0D ? ? ? ? 48 8B 94 05 90 FE FF FF"); bitset.ok)
 	{
-		const uintptr_t addr = bitset.value() + 7 + *reinterpret_cast<uint32_t*>(bitset.value() + 3);
-		g_feature_flags = reinterpret_cast<std::bitset<896>*>(addr);
+		const uintptr_t addr = bitset.addr + 7 + *reinterpret_cast<uint32_t*>(bitset.addr + 3);
+		g_feature_flags = reinterpret_cast<uint64_t(*)[14]>(addr);
 
-		if(const auto bitset_init = sig_scan(start, end, "55 48 89 E5 41 57 41 56 41 55 41 54 53 48 81 EC ? ? 00 00 49 89 FE 48  8D 9D ? ? ? ? 48 89 DF E8 ? ? ? ? 48 8B 1B 48 85 DB"); bitset_init)
+		if(const auto bs_init = sig_scan(start, end,
+			"55 48 89 E5 41 57 41 56 41 55 41 54 53 48 81 EC ? ? 00 00 49 89 FE 48  8D 9D ? ? ? ? 48 89 DF E8 ? ? ? ? 48 8B 1B 48 85 DB"); bs_init.ok)
 		{
-			if(auto trampoline = create_hook(bitset_init.value(), reinterpret_cast<uintptr_t>(hook_bitset_init)); trampoline)
+			if(auto trampoline = create_hook(bs_init.addr, reinterpret_cast<uintptr_t>(hook_bitset_init)); trampoline.ok)
 			{
-				_bitset_init = reinterpret_cast<decltype(_bitset_init)>(trampoline.value());
-
-				// Modern path installed; the legacy per-feature hooks below are
-				// unnecessary and their byte signatures are ambiguous on current
-				// builds (the is_user_feature_set pattern matches generic
-				// std::shared_ptr accessors), so do not install them.
+				_bitset_init = reinterpret_cast<decltype(_bitset_init)>(trampoline.addr);
 				return;
 			}
 		}
 	}
 
-	// Legacy fallback: only reached on pre-2024/08/13 builds that still gate
-	// features per call and therefore lack the bitset path above.
-	if(const auto is_user_feature_set = sig_scan(start, end, "55 48 89 E5 48 8B 07 48 85 C0 74 09"); is_user_feature_set)
+	// Legacy fallback: pre-2024/08/13 per-feature hooks.
+	if(const auto usf = sig_scan(start, end, "55 48 89 E5 48 8B 07 48 85 C0 74 09"); usf.ok)
 	{
-		if(auto trampoline = create_hook(is_user_feature_set.value(), reinterpret_cast<uintptr_t>(hook_is_user_feature_set)); trampoline)
+		if(auto trampoline = create_hook(usf.addr, reinterpret_cast<uintptr_t>(hook_is_user_feature_set)); trampoline.ok)
 		{
-			_is_user_feature_set = reinterpret_cast<decltype(_is_user_feature_set)>(trampoline.value());
+			_is_user_feature_set = reinterpret_cast<decltype(_is_user_feature_set)>(trampoline.addr);
 		}
 	}
 
-	if(const auto is_feature_available_ref = sig_scan(start, end, "E8 ? ? ? ? 86 43"); is_feature_available_ref)
+	if(const auto ifa_ref = sig_scan(start, end, "E8 ? ? ? ? 86 43"); ifa_ref.ok)
 	{
-		const auto is_feature_available = follow_call_rel32(is_feature_available_ref.value());
+		const auto ifa = follow_call_rel32(ifa_ref.addr);
 
-		if(auto trampoline = create_hook(is_feature_available, reinterpret_cast<uintptr_t>(hook_is_feature_available)); trampoline)
+		if(auto trampoline = create_hook(ifa, reinterpret_cast<uintptr_t>(hook_is_feature_available)); trampoline.ok)
 		{
-			_is_feature_available = reinterpret_cast<decltype(_is_feature_available)>(trampoline.value());
+			_is_feature_available = reinterpret_cast<decltype(_is_feature_available)>(trampoline.addr);
 		}
 	}
 
-	if(const auto map_find = sig_scan(start, end, "55 48 89 E5 41 57 41 56 53 48 83 EC ? 49 89 F7 4C 8D 77"); map_find)
+	if(const auto mf = sig_scan(start, end, "55 48 89 E5 41 57 41 56 53 48 83 EC ? 49 89 F7 4C 8D 77"); mf.ok)
 	{
-		if(auto trampoline = create_hook(map_find.value(), reinterpret_cast<uintptr_t>(hook_map_find)); trampoline)
+		if(auto trampoline = create_hook(mf.addr, reinterpret_cast<uintptr_t>(hook_map_find)); trampoline.ok)
 		{
-			_map_find = reinterpret_cast<decltype(_map_find)>(trampoline.value());
+			_map_find = reinterpret_cast<decltype(_map_find)>(trampoline.addr);
 		}
 	}
 }

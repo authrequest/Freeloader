@@ -81,3 +81,34 @@ RUN set -eux; \
     printf '#!/usr/bin/with-contenv bash\nexec s6-setuidgid abc /usr/lib/plexmediaserver/plex-crack-wrapper.sh\n' \
         > "${RUN_SCRIPT}"; \
     chmod 0755 "${RUN_SCRIPT}"
+
+# ── Patch the PMS binary in-place to disable transcode session limits ──────
+# Patches 6 conditional-jump instructions so the limit-checking code always
+# takes the normal (no-error) path. See AGENTS.md for full RE notes.
+RUN set -eux; \
+    PMS="/usr/lib/plexmediaserver/Plex Media Server"; \
+    \
+    # Read N bytes at a file offset as hex string (no separator). \
+    rd() { dd if="${PMS}" bs=1 skip="$1" count="$2" 2>/dev/null | od -A n -t x1 | tr -d ' \n'; }; \
+    \
+    # sanity: verify expected bytes at each patch site (guards against version drift) \
+    echo "=== verifying patch-site bytes ==="; \
+    [ "$(rd 18624607 2)" = "7e0c"         ] || { echo "sanity FAIL at 0x11C305F"; exit 1; }; \
+    [ "$(rd 18624781 2)" = "7e08"         ] || { echo "sanity FAIL at 0x11C310D"; exit 1; }; \
+    [ "$(rd 18624793 2)" = "7e08"         ] || { echo "sanity FAIL at 0x11C3119"; exit 1; }; \
+    [ "$(rd 18624674 6)" = "0f8fc2f6ffff" ] || { echo "sanity FAIL at 0x11C30A2"; exit 1; }; \
+    [ "$(rd 18624682 6)" = "0f8f1ef7ffff" ] || { echo "sanity FAIL at 0x11C30AA"; exit 1; }; \
+    [ "$(rd 18624630 6)" = "0f8f9f000000" ] || { echo "sanity FAIL at 0x11C3076"; exit 1; }; \
+    echo "sanity: expected bytes match, applying patches"; \
+    \
+    # apply patches \
+    # jle -> jmp (2-byte: \353=0xEB  \14=0x0C  \10=0x08) \
+    printf '\353\014'      | dd of="${PMS}" bs=1 seek=18624607 conv=notrunc 2>/dev/null; \
+    printf '\353\010'      | dd of="${PMS}" bs=1 seek=18624781 conv=notrunc 2>/dev/null; \
+    printf '\353\010'      | dd of="${PMS}" bs=1 seek=18624793 conv=notrunc 2>/dev/null; \
+    # jg -> NOP (6-byte: \220=0x90) \
+    printf '\220\220\220\220\220\220' | dd of="${PMS}" bs=1 seek=18624674 conv=notrunc 2>/dev/null; \
+    printf '\220\220\220\220\220\220' | dd of="${PMS}" bs=1 seek=18624682 conv=notrunc 2>/dev/null; \
+    printf '\220\220\220\220\220\220' | dd of="${PMS}" bs=1 seek=18624630 conv=notrunc 2>/dev/null; \
+    \
+    echo "binary patch applied: transcode session limits disabled"

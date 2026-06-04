@@ -13,6 +13,7 @@ id_rsa*
 # ─── Copyrighted Plex binaries (do NOT redistribute) ─────────────────────
 /Plex_Media_Server
 /Plex Media Server
+pms.bin
 libsoci_core.so
 
 # ─── IDA Pro databases (large; derived from the copyrighted binary) ──────

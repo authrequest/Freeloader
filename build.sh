@@ -51,7 +51,7 @@ fi
 echo "Using zig: ${ZIG} ($("${ZIG}" version))"
 
 # Required sources.
-for f in src/hook.cpp src/hook.hpp src/main.cpp third_party/zydis/Zydis.c third_party/zydis/Zydis.h; do
+for f in src/hook.cpp src/hook.hpp src/main.cpp src/traffic_logger.hpp src/traffic_logger.cpp third_party/zydis/Zydis.c third_party/zydis/Zydis.h; do
     [ -f "$f" ] || { echo "ERROR: missing $f"; exit 1; }
 done
 
@@ -69,17 +69,26 @@ echo "=== linking ${OUT} ==="
 "${ZIG}" c++ -target "${TARGET}" -nostdlib++ -shared -o "${OUT}" build/main.o build/hook.o build/Zydis.o
 rm -f build/Zydis.o build/hook.o build/main.o
 
-echo ""
-echo "=== ABI sanity check (external symbols must all be musl libc) ==="
-# Any of these glibc-only names appearing as UND means the .so will fail to load.
-if readelf --dyn-syms "${OUT}" | grep -E "UND .*(__isoc23_|_chk$|arc4random|_dl_find_object)" ; then
-    echo "ERROR: glibc-only symbols present -- this will not load into Plex."
-    exit 1
-fi
-echo "OK: only musl libc symbols are referenced."
-echo "NEEDED: $(readelf -d "${OUT}" | awk '/NEEDED/{print $5}' | tr -d '[]' | tr '\n' ' ')"
-echo ""
-echo "=== BUILD SUCCESSFUL: $(pwd)/${OUT} ($(stat -c %s "${OUT}") bytes) ==="
+# ── Traffic logger (socket-hooking LD_PRELOAD library) ──────────────────────
+TRF_OUT="build/plexmediaserver_traffic_logger.so"
+echo "=== compiling traffic_logger.cpp (C++) ==="
+"${ZIG}" c++ "${CXXFLAGS[@]}" -c src/traffic_logger.cpp -o build/traffic_logger.o
+echo "=== linking ${TRF_OUT} ==="
+"${ZIG}" c++ -target "${TARGET}" -nostdlib++ -shared -o "${TRF_OUT}" build/traffic_logger.o
+rm -f build/traffic_logger.o
+echo "=== $("${ZIG}" size "${TRF_OUT}" 2>/dev/null || stat -c %s "${TRF_OUT}") ==="
+
+for lib in "${OUT}" "${TRF_OUT}"; do
+    echo ""
+    echo "=== ABI sanity check: ${lib} ==="
+    if readelf --dyn-syms "${lib}" | grep -E "UND .*(__isoc23_|_chk$|arc4random|_dl_find_object)" ; then
+        echo "ERROR: glibc-only symbols present in ${lib} -- this will not load into Plex."
+        exit 1
+    fi
+    echo "OK: only musl libc symbols are referenced."
+    echo "NEEDED: $(readelf -d "${lib}" | awk '/NEEDED/{print $5}' | tr -d '[]' | tr '\n' ' ')"
+    echo "=== $(stat -c %s "${lib}") bytes ==="
+done
 
 cat <<'EOF'
 

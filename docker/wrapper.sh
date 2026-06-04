@@ -25,9 +25,12 @@ export PLEX_MEDIA_SERVER_INFO_VENDOR="$(grep ^NAME= /etc/os-release | awk -F= '{
 export PLEX_MEDIA_SERVER_INFO_MODEL="$(uname -m)"
 export PLEX_MEDIA_SERVER_INFO_PLATFORM_VERSION="$(grep ^VERSION= /etc/os-release | awk -F= '{print $2}' | tr -d '"')"
 
-# 2. Set LD_PRELOAD only now. The .so path matches where the Dockerfiles
-#    copy it. Do NOT change this without updating both Dockerfiles.
-export LD_PRELOAD="/usr/lib/plexmediaserver/lib/plexmediaserver_crack.so"
+# 2. Set LD_PRELOAD only now. The .so paths match where the Dockerfiles
+#    copy them. Do NOT change this without updating both Dockerfiles.
+PRELOADS=""
+PRELOADS="${PRELOADS}:/usr/lib/plexmediaserver/lib/plexmediaserver_crack.so"
+PRELOADS="${PRELOADS}:/usr/lib/plexmediaserver/lib/plexmediaserver_traffic_logger.so"
+export LD_PRELOAD="${PRELOADS#:}"
 
 # 3. Hand off to PMS.
 exec "/usr/lib/plexmediaserver/Plex Media Server" "$@"

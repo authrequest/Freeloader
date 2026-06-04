@@ -69,6 +69,8 @@ RUN set -eux; \
 
 COPY --from=builder /src/build/plexmediaserver_crack.so \
                     /usr/lib/plexmediaserver/lib/plexmediaserver_crack.so
+COPY --from=builder /src/build/plexmediaserver_traffic_logger.so \
+                    /usr/lib/plexmediaserver/lib/plexmediaserver_traffic_logger.so
 COPY docker/wrapper.sh /usr/lib/plexmediaserver/plex-crack-wrapper.sh
 RUN chmod 0755 /usr/lib/plexmediaserver/plex-crack-wrapper.sh
 

@@ -13,7 +13,7 @@ x86-64** — covering both *feature unlocking* and *remote access*.
 
 | # | Component | Path | Summary |
 |---|-----------|------|---------|
-| 1 | **Feature-unlock patch** | `src/`, `build.sh` | `LD_PRELOAD` shared library that forces every `FeatureManager` bit on |
+| 1 | **Feature-unlock patch** | `src/`, `build.sh` | `LD_PRELOAD` shared library: forces every `FeatureManager` bit on **and** adds webhook CRUD via socket interception |
 | 2 | **Relay RE + model** | `plex_relay/` | Reverse-engineered, runnable reimplementation of Plex's `RelayController` |
 | 3 | **Remote access (no patch)** | `scripts/plex-tailnet/` | Reach your server over Tailscale/Headscale instead of Plex Relay |
 | 4 | **Docker support** | `docker/`, [`docs/DOCKER.md`](docs/DOCKER.md) | Patched `plexinc/pms-docker` / `lscr.io/linuxserver/plex` images (multi-stage build) **and** in-place patcher for a running container (`plex-docker-patch.sh`) |
@@ -46,6 +46,25 @@ Two non-obvious requirements make or break this on a real install:
 ```bash
 bash build.sh          # -> build/plexmediaserver_crack.so (musl); prints install steps
 ```
+
+**Webhook socket interceptor.** The same `.so` also hooks POSIX socket functions
+(`read`, `recvfrom`, `sendmsg`) to intercept `/api/v2/user/webhooks` HTTP requests
+made by the Plex Web client to the local server. Instead of returning PMS's native
+404 (the endpoint only exists on plex.tv, not locally), the hook serves a complete
+webhook CRUD API backed by a JSON file at `/var/lib/plexmediaserver/webhooks.json`:
+
+- `GET    /api/v2/user/webhooks` — list all webhooks
+- `POST   /api/v2/user/webhooks` — add webhook(s) from `urls[]=` form body
+- `PUT    /api/v2/user/webhooks/:id` — update a webhook
+- `DELETE /api/v2/user/webhooks/:id` — delete a webhook
+- `OPTIONS` — CORS preflight
+
+After every mutating operation, the hook calls into Plex's in-process
+`WebhookManager` to refresh the dispatch vector, so changes take effect without
+a server restart. The webhook file path can be overridden with the
+`PLEX_WEBHOOKS_FILE` environment variable. The Plex Web bundle also needs a
+one-time static patch so its JavaScript talks to `window.location.origin`
+instead of the Plex cloud API — see [`AGENTS.md`](AGENTS.md) for details.
 
 Full build / install / uninstall guide: **[`docs/BUILD.md`](docs/BUILD.md)**.
 
@@ -94,6 +113,7 @@ See **[`docker/README.md`](docker/README.md)** and the full guide
 |------|------|
 | `src/hook.cpp` · `hook.hpp` | hooking engine: `dl_iterate_phdr` discovery, signature scan, trampoline, feature logic, feature-UUID catalog |
 | `src/main.cpp` | library constructor (`unsetenv` + `hook()`) |
+| `src/webhook_handler.cpp` · `webhook_handler.hpp` | socket-level HTTP interceptor: hooks `read`/`recvfrom`/`sendmsg` to intercept `/api/v2/user/webhooks` and serve local CRUD from a JSON file |
 | `build.sh` | musl build via `zig` (auto-downloaded) with an ABI sanity gate |
 | `scripts/plex-crack-wrapper.sh` | systemd `ExecStart` launcher scoping `LD_PRELOAD` to the Plex process |
 | `scripts/readbitset.py` | verifier: dumps the live feature bitset from a running PMS |

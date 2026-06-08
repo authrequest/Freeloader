@@ -13,7 +13,7 @@
 #   5. restart Plex and run a health check (also available as `--healthcheck`)
 #
 # Target: Debian/Ubuntu-family with systemd. Requires: tailscale (auto-installed),
-# python3, curl. Run as root (except --healthcheck).
+# python3, python3-defusedxml, curl. Run as root (except --healthcheck).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -19,12 +19,30 @@ from __future__ import annotations
 
 import argparse
 import sys
-import xml.etree.ElementTree as ET
+from collections.abc import Callable
+from typing import Protocol, cast
+
+try:
+    import defusedxml.ElementTree as ET
+except ModuleNotFoundError:
+    sys.exit("plex_prefs: missing dependency: install python3-defusedxml")
 
 
-def _load(path: str) -> tuple[ET.ElementTree, ET.Element]:
+class _PrefsElement(Protocol):
+    tag: str
+
+    def get(self, key: str, default: str = "") -> str: ...
+    def set(self, key: str, value: str) -> None: ...
+
+
+class _PrefsTree(Protocol):
+    def getroot(self) -> _PrefsElement: ...
+    def write(self, file_or_filename: str, encoding: str, xml_declaration: bool) -> None: ...
+
+
+def _load(path: str) -> tuple[_PrefsTree, _PrefsElement]:
     try:
-        tree = ET.parse(path)
+        tree = cast(_PrefsTree, cast(object, ET.parse(path)))
     except (OSError, ET.ParseError) as exc:
         sys.exit(f"plex_prefs: cannot read {path}: {exc}")
     root = tree.getroot()
@@ -33,7 +51,7 @@ def _load(path: str) -> tuple[ET.ElementTree, ET.Element]:
     return tree, root
 
 
-def _merge_csv(root: ET.Element, attr: str, additions: list[str]) -> None:
+def _merge_csv(root: _PrefsElement, attr: str, additions: list[str]) -> None:
     items = [x for x in (s.strip() for s in root.get(attr, "").split(",")) if x]
     for value in additions:
         if value and value not in items:
@@ -42,22 +60,31 @@ def _merge_csv(root: ET.Element, attr: str, additions: list[str]) -> None:
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    tree, root = _load(args.prefs)
-    if args.custom_url:
-        _merge_csv(root, "customConnections", [args.custom_url])
-    if args.lan:
-        _merge_csv(root, "LanNetworksBandwidth", [c for c in args.lan.split(",") if c])
-    if args.secure in ("0", "1", "2"):
-        root.set("secureConnections", args.secure)
-    if args.relay in ("0", "1"):
-        root.set("RelayEnabled", args.relay)
-    tree.write(args.prefs, encoding="utf-8", xml_declaration=True)
+    prefs = cast(str, args.prefs)
+    custom_url = cast(str, args.custom_url)
+    lan = cast(str, args.lan)
+    secure = cast(str, args.secure)
+    relay = cast(str, args.relay)
+
+    tree, root = _load(prefs)
+    if custom_url:
+        _merge_csv(root, "customConnections", [custom_url])
+    if lan:
+        _merge_csv(root, "LanNetworksBandwidth", [c for c in lan.split(",") if c])
+    if secure in ("0", "1", "2"):
+        root.set("secureConnections", secure)
+    if relay in ("0", "1"):
+        root.set("RelayEnabled", relay)
+    tree.write(prefs, encoding="utf-8", xml_declaration=True)
     return 0
 
 
 def cmd_get(args: argparse.Namespace) -> int:
-    _, root = _load(args.prefs)
-    print(root.get(args.attr, ""))
+    prefs = cast(str, args.prefs)
+    attr = cast(str, args.attr)
+
+    _, root = _load(prefs)
+    print(root.get(attr, ""))
     return 0
 
 
@@ -66,20 +93,21 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     m = sub.add_parser("merge", help="merge tailnet settings into Preferences.xml")
-    m.add_argument("prefs")
-    m.add_argument("--custom-url", default="")
-    m.add_argument("--lan", default="")
-    m.add_argument("--secure", default="", help="0=Required 1=Preferred 2=Disabled")
-    m.add_argument("--relay", default="", help="0=disable 1=enable Plex Relay")
+    _ = m.add_argument("prefs")
+    _ = m.add_argument("--custom-url", default="")
+    _ = m.add_argument("--lan", default="")
+    _ = m.add_argument("--secure", default="", help="0=Required 1=Preferred 2=Disabled")
+    _ = m.add_argument("--relay", default="", help="0=disable 1=enable Plex Relay")
     m.set_defaults(func=cmd_merge)
 
     g = sub.add_parser("get", help="print one Preferences.xml attribute")
-    g.add_argument("prefs")
-    g.add_argument("attr")
+    _ = g.add_argument("prefs")
+    _ = g.add_argument("attr")
     g.set_defaults(func=cmd_get)
 
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    func = cast(Callable[[argparse.Namespace], int], args.func)
+    return func(args)
 
 
 if __name__ == "__main__":

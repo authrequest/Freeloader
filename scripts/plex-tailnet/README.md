@@ -122,7 +122,7 @@ Other flags: `--prefs PATH` (quote it), `--service`, `--port`, `--url-scheme`,
 `--ts-iface`, `--skip-tailscale`, `--skip-plex`, `--dry-run`.
 
 **Prerequisites:** Plex installed, **claimed**, owner signed in; Linux + systemd;
-`python3` + `curl`; run as root (except `--healthcheck`).
+`python3` + `python3-defusedxml` + `curl`; run as root (except `--healthcheck`).
 
 ---
 

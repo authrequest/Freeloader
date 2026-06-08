@@ -51,7 +51,7 @@ fi
 echo "Using zig: ${ZIG} ($("${ZIG}" version))"
 
 # Required sources.
-for f in src/hook.cpp src/hook.hpp src/main.cpp src/traffic_logger.hpp src/traffic_logger.cpp third_party/zydis/Zydis.c third_party/zydis/Zydis.h; do
+for f in src/hook.cpp src/hook.hpp src/main.cpp src/webhook_handler.hpp src/webhook_handler.cpp src/traffic_logger.hpp src/traffic_logger.cpp third_party/zydis/Zydis.c third_party/zydis/Zydis.h; do
     [ -f "$f" ] || { echo "ERROR: missing $f"; exit 1; }
 done
 
@@ -65,9 +65,11 @@ echo "=== compiling hook.cpp (C++) ==="
 "${ZIG}" c++ "${CXXFLAGS[@]}" -c src/hook.cpp -o build/hook.o
 echo "=== compiling main.cpp (C++) ==="
 "${ZIG}" c++ "${CXXFLAGS[@]}" -c src/main.cpp -o build/main.o
+echo "=== compiling webhook_handler.cpp (C++) ==="
+"${ZIG}" c++ "${CXXFLAGS[@]}" -c src/webhook_handler.cpp -o build/webhook_handler.o
 echo "=== linking ${OUT} ==="
-"${ZIG}" c++ -target "${TARGET}" -nostdlib++ -shared -o "${OUT}" build/main.o build/hook.o build/Zydis.o
-rm -f build/Zydis.o build/hook.o build/main.o
+"${ZIG}" c++ -target "${TARGET}" -nostdlib++ -shared -o "${OUT}" build/main.o build/hook.o build/webhook_handler.o build/Zydis.o
+rm -f build/Zydis.o build/hook.o build/main.o build/webhook_handler.o
 
 # ── Traffic logger (socket-hooking LD_PRELOAD library) ──────────────────────
 TRF_OUT="build/plexmediaserver_traffic_logger.so"

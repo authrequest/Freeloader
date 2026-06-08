@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "hook.hpp"
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <link.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include "Zydis.h"
+#include "webhook_handler.hpp"
 
 struct FeatureGuidEntry
 {
@@ -143,46 +144,76 @@ static uint64_t (*_bitset_init)(uintptr_t) = nullptr;
 static uint64_t (*_is_feature_available)(uintptr_t, const char**) = nullptr;
 static uint64_t* (*_map_find)(uintptr_t*, const char**) = nullptr;
 static bool (*_is_user_feature_set)(uintptr_t, int, int) = nullptr;
+static uint64_t (*_sub_122B2F2)(uintptr_t, char*) = nullptr;
+static uint64_t (*_sub_125ACA6)(uintptr_t) = nullptr;
 
 // Returns the runtime [start, end) of the main program's executable code
-// using dl_iterate_phdr. The first object visited is always the main program;
-// we merge every executable (PF_X) PT_LOAD into one span.
+// by parsing /proc/self/maps for every r-xp segment of "Plex Media Server".
+//
+// dl_iterate_phdr cannot be used because under musl's dynamic linker the
+// LD_PRELOAD library's constructor runs BEFORE the main PIE binary is
+// loaded, so dl_iterate_phdr returns 0 callbacks.
 TextSpan get_dottext_info()
 {
-	struct ExecSpan
-	{
-		uintptr_t start;
-		uintptr_t end;
-	} span = {UINTPTR_MAX, 0};
+	FILE* maps = fopen("/proc/self/maps", "r");
+	if(!maps)
+		return {false, 0, 0};
 
-	dl_iterate_phdr([](dl_phdr_info* info, size_t, void* data) -> int
-	{
-		auto* out = static_cast<ExecSpan*>(data);
+	uintptr_t text_start = UINTPTR_MAX;
+	uintptr_t text_end   = 0;
+	char line[8192];
 
-		for(int i = 0; i < info->dlpi_phnum; i++)
+	while(fgets(line, sizeof(line), maps))
+	{
+		// Format: start-end perm offset dev inode [path]
+		//
+		// We want every r-xp (read-execute, non-writable) segment of the
+		// main PIE binary, whose path ends in "Plex Media Server".
+		// PMS maps the executable text as several adjacent executable ranges;
+		// scanning only the first range misses the hook signatures.
+		//
+		// Codec .so files live under .../Codecs/... and also contain
+		// "Plex Media Server" in their path, so we check for the exact
+		// path suffix instead of a substring.
+
+		if(const char* path = strstr(line, "/usr/lib/plexmediaserver/"))
 		{
-			const ElfW(Phdr)& phdr = info->dlpi_phdr[i];
-
-			if(phdr.p_type == PT_LOAD && (phdr.p_flags & PF_X) != 0)
-			{
-				const uintptr_t seg_start = info->dlpi_addr + phdr.p_vaddr;
-				const uintptr_t seg_end = seg_start + phdr.p_memsz;
-
-				if(seg_start < out->start) out->start = seg_start;
-				if(seg_end > out->end)    out->end   = seg_end;
-			}
+			path += strlen("/usr/lib/plexmediaserver/");
+			if(strncmp(path, "Plex Media Server", 17) != 0)
+				continue; // codec .so or plugin, skip
+		}
+		else
+		{
+			continue; // not our binary
 		}
 
-		// First object only = main program.
-		return 1;
-	}, &span);
+		// Parse permission field (field #2, after address range).
+		const char* perm = line;
+		while(*perm && *perm != ' ') perm++;
+		while(*perm == ' ') perm++;
 
-	if(span.end <= span.start)
-	{
-		return {false, 0, 0};
+		if(perm[0] != 'r' || perm[1] != '-' || perm[2] != 'x' || perm[3] != 'p')
+			continue; // not an executable mapping
+
+		// Parse address range.
+		const char* addr = line;
+		char* end = nullptr;
+		const uintptr_t seg_start = strtoull(addr, &end, 16);
+		if(!end || *end != '-') continue;
+
+		const uintptr_t seg_end = strtoull(end + 1, &end, 16);
+		if(!end) continue;
+
+		if(seg_start < text_start) text_start = seg_start;
+		if(seg_end > text_end) text_end = seg_end;
 	}
 
-	return {true, span.start, span.end};
+	fclose(maps);
+
+	if(text_end <= text_start)
+		return {false, 0, 0};
+
+	return {true, text_start, text_end};
 }
 
 OptAddr create_hook(uintptr_t from, uintptr_t to)
@@ -234,7 +265,12 @@ OptAddr create_hook(uintptr_t from, uintptr_t to)
 	// Jump to target code
 	*reinterpret_cast<uintptr_t*>(&shellcode[6]) = to;
 
-	if(mprotect(reinterpret_cast<void*>(from), sizeof(shellcode), PROT_READ|PROT_WRITE|PROT_EXEC) != 0)
+	// mprotect requires a page-aligned address.  The target function sits
+	// inside .text, which is mapped at page granularity.  Align down to
+	// the page boundary so mprotect succeeds.
+	const uintptr_t from_page = from & ~(static_cast<uintptr_t>(getpagesize()) - 1);
+
+	if(mprotect(reinterpret_cast<void*>(from_page), getpagesize(), PROT_READ|PROT_WRITE|PROT_EXEC) != 0)
 	{
 		munmap(trampoline_mem, getpagesize());
 		return {false, 0};
@@ -242,7 +278,14 @@ OptAddr create_hook(uintptr_t from, uintptr_t to)
 
 	memcpy(reinterpret_cast<void*>(from), shellcode, sizeof(shellcode));
 
-	if(mprotect(reinterpret_cast<void*>(from), sizeof(shellcode), PROT_READ|PROT_EXEC) != 0)
+	// Flush instruction cache so the CPU sees the modified code.
+	// On x86 this is a no-op at the hardware level (icache is coherent)
+	// but acts as a compiler barrier to prevent reordering the memcpy
+	// past the subsequent mprotect.
+	__builtin___clear_cache(reinterpret_cast<char*>(from),
+	                        reinterpret_cast<char*>(from) + sizeof(shellcode));
+
+	if(mprotect(reinterpret_cast<void*>(from_page), getpagesize(), PROT_READ|PROT_EXEC) != 0)
 	{
 		// Memory is still RWX (suboptimal but not fatal).
 	}
@@ -362,6 +405,35 @@ bool hook_is_user_feature_set([[maybe_unused]] uintptr_t rcx, [[maybe_unused]] i
 	return static_cast<bool>(expected);
 }
 
+uint64_t hook_sub_122B2F2(uintptr_t this_ptr, char* key)
+{
+	if(_sub_122B2F2) {
+		if(strcmp(key, "WebHooksEnabled") == 0) {
+			const char true_str[] = "1";
+			// "1" is 2 bytes + null within 22-byte SSO threshold.
+			// Construct SSO std::string: bytes 0=N, byte 23=22-N.
+			// For length 1: byte 23 = 22-1 = 21 = 0x15.
+			memcpy(reinterpret_cast<void*>(this_ptr + 16), true_str, 2);
+			reinterpret_cast<uint8_t*>(this_ptr)[23] = 0x15;
+			return 1;
+		}
+		return _sub_122B2F2(this_ptr, key);
+	}
+	return 0;
+}
+
+uint64_t hook_sub_125ACA6(uintptr_t manager)
+{
+	if(_sub_125ACA6)
+	{
+		const auto ret = _sub_125ACA6(manager);
+		webhook_set_manager(reinterpret_cast<void*>(manager));
+		webhook_inject_into_manager(reinterpret_cast<void*>(manager));
+		return ret;
+	}
+	return 0;
+}
+
 void hook()
 {
 	auto info = get_dottext_info();
@@ -374,7 +446,47 @@ void hook()
 	const uintptr_t start = info.start;
 	const uintptr_t end = info.end;
 
-	// Modern path (PMS BETA 2024/08/13+): force the entire feature bitset.
+	// STEP 1: sub_122B2F2 (the generic preference getter): force WebHooksEnabled.
+	if(const auto wh = sig_scan(start, end,
+		"55 48 89 E5 41 57 41 56 53 48 83 EC 18 48 89 F3 49 89 FE 0F B6 46 17 48 89 F1 84 C0"); wh.ok)
+	{
+		if(auto trampoline = create_hook(wh.addr, reinterpret_cast<uintptr_t>(hook_sub_122B2F2)); trampoline.ok)
+		{
+			_sub_122B2F2 = reinterpret_cast<decltype(_sub_122B2F2)>(trampoline.addr);
+		}
+	}
+
+	// STEP 2: sub_125E524+0x6DD inline patch (forces feature bit return to true)
+	// Temporarily disabled — suspected to corrupt adjacent instructions.
+	// The bitset_init hook (step 3) achieves the same goal cleanly.
+#if 0
+	if(const auto sa = sig_scan(start, end,
+		"55 48 89 E5 41 57 41 56 41 55 41 54 53 48 81 EC ? ? ? ? 49 89 F7 49 89 FC 41 BE ? ? ? ? 4C 03 77 28"); sa.ok)
+	{
+		const uintptr_t target = sa.addr + 0x6DD;
+		const uintptr_t page = target & ~(getpagesize() - 1);
+
+		if(mprotect(reinterpret_cast<void*>(page), getpagesize(), PROT_READ|PROT_WRITE|PROT_EXEC) == 0)
+		{
+			const uint8_t patch[] = {0xB0, 0x01, 0x90, 0x90, 0x90};
+			memcpy(reinterpret_cast<void*>(target), patch, sizeof(patch));
+			mprotect(reinterpret_cast<void*>(page), getpagesize(), PROT_READ|PROT_EXEC);
+		}
+	}
+#endif
+
+	// [WEBHOOK DISABLED] sub_125ACA6 hook — causes SIGSEGV at startup with
+	// the mprotect fix. The `create_hook` trampoline now works (page-aligned)
+	// and this hook fires during PMS init, but the manager layout offsets
+	// (+0x78 for map, +0x40 for vector pointers) are version-specific and
+	// crash on this build (1.43.2.10687).  The socket-level interposer
+	// (webhook_handler.cpp) works independently via LD_PRELOAD and handles
+	// webhook CRUD without this hook.
+	//
+	// Re-enable *only* after verifying the struct layout matches.
+	//
+
+	// STEP 3: Modern path (PMS BETA 2024/08/13+): force the entire feature bitset.
 	if(const auto bitset = sig_scan(start, end, "48 8D 0D ? ? ? ? 48 8B 94 05 90 FE FF FF"); bitset.ok)
 	{
 		const uintptr_t addr = bitset.addr + 7 + *reinterpret_cast<uint32_t*>(bitset.addr + 3);
@@ -391,7 +503,7 @@ void hook()
 		}
 	}
 
-	// Legacy fallback: pre-2024/08/13 per-feature hooks.
+	// STEP 4: Legacy fallback — pre-2024/08/13 per-feature hooks.
 	if(const auto usf = sig_scan(start, end, "55 48 89 E5 48 8B 07 48 85 C0 74 09"); usf.ok)
 	{
 		if(auto trampoline = create_hook(usf.addr, reinterpret_cast<uintptr_t>(hook_is_user_feature_set)); trampoline.ok)

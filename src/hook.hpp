@@ -19,5 +19,7 @@ uint64_t hook_is_feature_available(uintptr_t rcx, const char** guid);
 uint64_t* hook_map_find(uintptr_t* rcx, const char** str);
 uint64_t hook_bitset_init(uintptr_t rcx);
 bool     hook_is_user_feature_set(uintptr_t rcx, int expected, int feature);
+uint64_t hook_sub_122B2F2(uintptr_t prefs, char* key);
+uint64_t hook_sub_125ACA6(uintptr_t manager);
 
 void hook();

@@ -532,8 +532,7 @@ do_status() {
 
     if printf '%s' "${run_content}" | grep -q 'plex-crack-wrapper.sh'; then
         log "[*] PATCH IS ACTIVE (s6 run file points to the wrapper)."
-        if [ -n "${pms_pid}" ] \
-            && run docker exec "${CONTAINER_NAME}" grep -F plexmediaserver_crack.so "/proc/${pms_pid}/maps" >/dev/null 2>&1; then
+        if [ -n "${pms_pid}" ] && run docker exec "${CONTAINER_NAME}" grep -F plexmediaserver_crack.so "/proc/${pms_pid}/maps" >/dev/null 2>&1; then
             log "[*] .so is mapped into PMS (pid ${pms_pid})."
         else
             warn "PMS running (pid ${pms_pid:-?}) but .so is NOT in its maps; check docker logs."

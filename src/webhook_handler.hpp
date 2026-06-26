@@ -7,6 +7,10 @@
 extern "C" {
 #endif
 
+// NOTE: this handler interposes recv()/recvfrom()/close(), the same symbols the
+// traffic logger interposes. The two .so files cannot be LD_PRELOADed together —
+// only the first-loaded definition of each symbol wins. Use one or the other.
+
 // Initialise the webhook handler: resolve real socket function pointers
 // and set up the webhooks JSON file path. Must be called once at startup
 // (e.g. from the LD_PRELOAD library constructor or hook()).

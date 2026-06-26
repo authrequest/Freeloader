@@ -152,6 +152,19 @@ static const char* peer_for_fd(int fd, char* fallback_buf)
     return fallback_buf;
 }
 
+/// Record peer + start time for an fd in the connection table.
+static void track_conn(int fd, const char* peer)
+{
+    if(fd < 0 || fd >= CONN_MAX) return;
+
+    pthread_mutex_lock(&g_conn_lock);
+    g_conns[fd].active   = true;
+    g_conns[fd].start_ns = now_ns();
+    strncpy(g_conns[fd].peer, peer, sizeof(g_conns[fd].peer) - 1);
+    g_conns[fd].peer[sizeof(g_conns[fd].peer) - 1] = '\0';
+    pthread_mutex_unlock(&g_conn_lock);
+}
+
 // ── Logging ────────────────────────────────────────────────────────────────
 
 /// Write a hex+ASCII dump of `len` bytes starting at `data`.
@@ -198,11 +211,6 @@ static void log_hexdump(const unsigned char* data, size_t len)
         line[off++] = '|';
         line[off++] = '\n';
         write(g_log_fd, line, off);
-    }
-
-    if(len < MAX_DUMP && len > 0)
-    {
-        // No truncation needed.
     }
 }
 
@@ -331,14 +339,7 @@ extern "C" int connect(int sockfd, const struct sockaddr* addr, socklen_t addrle
         char peer_buf[PEER_LEN];
         fmt_peer(addr, addrlen, peer_buf, sizeof(peer_buf));
 
-        if(sockfd >= 0 && sockfd < CONN_MAX)
-        {
-            pthread_mutex_lock(&g_conn_lock);
-            g_conns[sockfd].active   = true;
-            g_conns[sockfd].start_ns = now_ns();
-            strcpy(g_conns[sockfd].peer, peer_buf);
-            pthread_mutex_unlock(&g_conn_lock);
-        }
+        track_conn(sockfd, peer_buf);
 
         log_traffic('C', sockfd, peer_buf, nullptr, 0,
                      ret == 0 ? nullptr : (errno == EINPROGRESS ? " (EINPROGRESS)" : " (FAIL)"));
@@ -355,14 +356,7 @@ extern "C" int accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen)
         char peer_buf[PEER_LEN];
         fmt_peer(addr, *addrlen, peer_buf, sizeof(peer_buf));
 
-        if(client < CONN_MAX)
-        {
-            pthread_mutex_lock(&g_conn_lock);
-            g_conns[client].active   = true;
-            g_conns[client].start_ns = now_ns();
-            strcpy(g_conns[client].peer, peer_buf);
-            pthread_mutex_unlock(&g_conn_lock);
-        }
+        track_conn(client, peer_buf);
 
         log_traffic('A', client, peer_buf, nullptr, 0, nullptr);
 
@@ -383,14 +377,7 @@ extern "C" int accept4(int sockfd, struct sockaddr* addr, socklen_t* addrlen, in
         char peer_buf[PEER_LEN];
         fmt_peer(addr, *addrlen, peer_buf, sizeof(peer_buf));
 
-        if(client < CONN_MAX)
-        {
-            pthread_mutex_lock(&g_conn_lock);
-            g_conns[client].active   = true;
-            g_conns[client].start_ns = now_ns();
-            strcpy(g_conns[client].peer, peer_buf);
-            pthread_mutex_unlock(&g_conn_lock);
-        }
+        track_conn(client, peer_buf);
 
         log_traffic('A', client, peer_buf, nullptr, 0, nullptr);
     }

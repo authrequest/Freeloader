@@ -103,11 +103,11 @@ struct WhParsedUrl {
 /// output and recvfrom() for HTTP input. Hooking write() caused SEGV during
 /// shutdown because PMS calls write() on many FDs and our hook could falsely
 /// intercept log/file writes with reused FD numbers.
-static ssize_t (*real_read)(int, void*, size_t) = NULL;
-static ssize_t (*real_recv)(int, void*, size_t, int) = NULL;
-static ssize_t (*real_recvfrom)(int, void*, size_t, int, struct sockaddr*, socklen_t*) = NULL;
-static ssize_t (*real_sendmsg)(int, const struct msghdr*, int) = NULL;
-static int (*real_close)(int) = NULL;
+static ssize_t (*real_read)(int, void*, size_t) = nullptr;
+static ssize_t (*real_recv)(int, void*, size_t, int) = nullptr;
+static ssize_t (*real_recvfrom)(int, void*, size_t, int, struct sockaddr*, socklen_t*) = nullptr;
+static ssize_t (*real_sendmsg)(int, const struct msghdr*, int) = nullptr;
+static int (*real_close)(int) = nullptr;
 static bool g_handler_ready = false;
 
 /// Per-FD tracking table (protected by g_fd_lock).
@@ -127,46 +127,48 @@ static pthread_mutex_t g_wh_path_lock = PTHREAD_MUTEX_INITIALIZER;
 /// Resolved path — mutable buffer returned for convenience (caller does not own).
 static const char* wh_path(void)
 {
+    // Resolve once under the lock. The earlier double-checked-locking version
+    // read g_wh_path_resolved without synchronisation (a data race); since this
+    // runs at most once per request, an unconditional lock is simpler and safe.
+    // g_wh_path is never mutated after resolution, so returning it unlocked is
+    // fine.
+    pthread_mutex_lock(&g_wh_path_lock);
     if(!g_wh_path_resolved)
     {
-        pthread_mutex_lock(&g_wh_path_lock);
-        if(!g_wh_path_resolved)
+        const char* env = getenv("PLEX_WEBHOOKS_FILE");
+        size_t n;
+        if(env && env[0])
         {
-            const char* env = getenv("PLEX_WEBHOOKS_FILE");
-            size_t n;
-            if(env && env[0])
-            {
-                n = strlen(env);
-                if(n >= sizeof(g_wh_path)) n = sizeof(g_wh_path) - 1;
-                memcpy(g_wh_path, env, n);
-            }
-            else
-            {
-                n = strlen(DEFAULT_WEBHOOKS_PATH);
-                memcpy(g_wh_path, DEFAULT_WEBHOOKS_PATH, n);
-            }
-            g_wh_path[n] = '\0';
-            g_wh_path_resolved = true;
+            n = strlen(env);
+            if(n >= sizeof(g_wh_path)) n = sizeof(g_wh_path) - 1;
+            memcpy(g_wh_path, env, n);
         }
-        pthread_mutex_unlock(&g_wh_path_lock);
+        else
+        {
+            n = strlen(DEFAULT_WEBHOOKS_PATH);
+            memcpy(g_wh_path, DEFAULT_WEBHOOKS_PATH, n);
+        }
+        g_wh_path[n] = '\0';
+        g_wh_path_resolved = true;
     }
+    pthread_mutex_unlock(&g_wh_path_lock);
     return g_wh_path;
 }
 
 // ── File I/O helpers ───────────────────────────────────────────────────────
 
-/// Read entire file into a malloc'd buffer. Caller must free(). Returns NULL on
+/// Read entire file into a malloc'd buffer. Caller must free(). Returns nullptr on
 /// failure (file missing, empty, or error).
 static char* read_file(const char* path, size_t* out_len)
 {
     FILE* f = fopen(path, "rb");
-    if(!f) return NULL;
+    if(!f) return nullptr;
 
     struct stat st;
     if(fstat(fileno(f), &st) != 0 || st.st_size == 0)
     {
         fclose(f);
-        return NULL;
+        return nullptr;
     }
 
     long fsize = st.st_size;
@@ -174,14 +176,14 @@ static char* read_file(const char* path, size_t* out_len)
     {
         // Sanity cap at 1 MB.
         fclose(f);
-        return NULL;
+        return nullptr;
     }
 
     char* buf = (char*)malloc((size_t)fsize + 1);
     if(!buf)
     {
         fclose(f);
-        return NULL;
+        return nullptr;
     }
 
     size_t nread = fread(buf, 1, (size_t)fsize, f);
@@ -237,11 +239,11 @@ static void skip_ws(const char** p)
 
 /// Parse a JSON string value. Advances *p past closing ".
 /// Returns pointer to the parsed string (static buffer, overwritten each call).
-/// Returns NULL on syntax error.
+/// Returns nullptr on syntax error.
 static const char* parse_string(const char** p)
 {
     skip_ws(p);
-    if(**p != '"') return NULL;
+    if(**p != '"') return nullptr;
     (*p)++; // skip opening "
 
     static char buf[2048];
@@ -258,7 +260,7 @@ static const char* parse_string(const char** p)
     }
     buf[i] = '\0';
 
-    if(**p != '"') return NULL;
+    if(**p != '"') return nullptr;
     (*p)++; // skip closing "
     return buf;
 }
@@ -338,7 +340,7 @@ static bool parse_one_webhook(const char** p, struct WhEntry* entry)
         }
         else if(strcmp(key, "active") == 0)
         {
-            parse_value(p, NULL, 0, &entry->active);
+            parse_value(p, nullptr, 0, &entry->active);
         }
         else
         {
@@ -401,41 +403,50 @@ static void load_webhooks(void)
     free(data);
 }
 
+/// Escape a string for JSON into dst (only " and \ require escaping here).
+static void json_escape(char* dst, size_t dst_size, const char* src)
+{
+    size_t j = 0;
+    for(size_t i = 0; src[i] && j + 2 < dst_size; i++)
+    {
+        if(src[i] == '"' || src[i] == '\\')
+            dst[j++] = '\\';
+        dst[j++] = src[i];
+    }
+    dst[j] = '\0';
+}
+
+/// Serialize a single webhook entry as a JSON object into buf.
+/// Returns the number of bytes written (excluding the NUL).
+static size_t serialize_entry(const struct WhEntry* e, char* buf, size_t size)
+{
+    char escaped_url[2048 * 2]; // worst case: every char escaped
+    json_escape(escaped_url, sizeof(escaped_url), e->url);
+    int n = snprintf(buf, size,
+        "{\"id\":\"%s\",\"url\":\"%s\",\"encoding\":\"%s\",\"format\":\"%s\",\"active\":%s}",
+        e->id, escaped_url, e->encoding, e->format,
+        e->active ? "true" : "false");
+    return (size_t)(n > 0 ? n : 0);
+}
+
 /// Serialize g_webhooks[] to a JSON string (caller must free).
 static char* serialize_webhooks(void)
 {
     // Estimate buffer size: each webhook ~256 bytes + overhead
     size_t cap = 256 + (size_t)g_webhook_count * 256;
     char* buf = (char*)malloc(cap);
-    if(!buf) return NULL;
+    if(!buf) return nullptr;
 
     size_t off = 0;
     off += snprintf(buf + off, cap - off, "[");
 
+    bool first = true;
     for(int i = 0; i < g_webhook_count; i++)
     {
         if(!g_webhooks[i].valid) continue;
-
-        // We need to escape url for JSON (only " and \ require escaping).
-        // Build a simple escaped copy on the stack.
-        char escaped_url[2048 * 2]; // worst case: every char is escaped
-        size_t ej = 0;
-        for(size_t si = 0; g_webhooks[i].url[si] && ej < sizeof(escaped_url) - 2; si++)
-        {
-            if(g_webhooks[i].url[si] == '"' || g_webhooks[i].url[si] == '\\')
-                escaped_url[ej++] = '\\';
-            escaped_url[ej++] = g_webhooks[i].url[si];
-        }
-        escaped_url[ej] = '\0';
-
-        if(i > 0) off += snprintf(buf + off, cap - off, ",");
-        off += snprintf(buf + off, cap - off,
-            "{\"id\":\"%s\",\"url\":\"%s\",\"encoding\":\"%s\",\"format\":\"%s\",\"active\":%s}",
-            g_webhooks[i].id,
-            escaped_url,
-            g_webhooks[i].encoding,
-            g_webhooks[i].format,
-            g_webhooks[i].active ? "true" : "false");
+        if(!first) off += snprintf(buf + off, cap - off, ",");
+        first = false;
+        off += serialize_entry(&g_webhooks[i], buf + off, cap - off);
     }
 
     off += snprintf(buf + off, cap - off, "]");
@@ -445,11 +456,11 @@ static char* serialize_webhooks(void)
 /// Save g_webhooks[] to the JSON file.
 static bool save_webhooks(void)
 {
-	char* json = serialize_webhooks();
-	if(!json) return false;
-	bool ok = write_file(wh_path(), json, strlen(json));
-	free(json);
-	return ok;
+    char* json = serialize_webhooks();
+    if(!json) return false;
+    bool ok = write_file(wh_path(), json, strlen(json));
+    free(json);
+    return ok;
 }
 
 static void refresh_webhook_manager(void);
@@ -527,33 +538,47 @@ static void normalize_webhook_url(char* url, size_t url_size)
     url[url_size - 1] = '\0';
 }
 
+/// Iterator over a urlencoded form body. Created with {body, body + body_len}.
+struct FormParser { const char* p; const char* end; };
+
+/// Pull the next key/value pair from a urlencoded form body, url-decoding both
+/// into the caller's buffers. Returns false when the body is exhausted.
+static bool form_next(struct FormParser* fp,
+                      char* key, size_t key_size,
+                      char* val, size_t val_size)
+{
+    if(fp->p >= fp->end || !*fp->p) return false;
+
+    const char* key_start = fp->p;
+    while(fp->p < fp->end && *fp->p && *fp->p != '=' && *fp->p != '&') fp->p++;
+    const char* key_end = fp->p;
+
+    const char* val_start = fp->p;
+    const char* val_end = fp->p;
+    if(fp->p < fp->end && *fp->p == '=')
+    {
+        fp->p++;
+        val_start = fp->p;
+        while(fp->p < fp->end && *fp->p && *fp->p != '&') fp->p++;
+        val_end = fp->p;
+    }
+
+    url_decode_copy(key, key_size, key_start, static_cast<size_t>(key_end - key_start));
+    url_decode_copy(val, val_size, val_start, static_cast<size_t>(val_end - val_start));
+
+    if(fp->p < fp->end && *fp->p == '&') fp->p++;
+    return true;
+}
+
 static bool parse_webhook_form(const char* body, size_t body_len, struct WhEntry* entry)
 {
-    const char* p = body;
-    const char* end = body + body_len;
+    struct FormParser fp = { body, body + body_len };
     bool found_url = false;
 
-    while(p < end && *p)
+    char key[64];
+    char val[2048];
+    while(form_next(&fp, key, sizeof(key), val, sizeof(val)))
     {
-        const char* key_start = p;
-        while(p < end && *p && *p != '=' && *p != '&') p++;
-        const char* key_end = p;
-
-        const char* val_start = p;
-        const char* val_end = p;
-        if(p < end && *p == '=')
-        {
-            p++;
-            val_start = p;
-            while(p < end && *p && *p != '&') p++;
-            val_end = p;
-        }
-
-        char key[64];
-        char val[2048];
-        url_decode_copy(key, sizeof(key), key_start, static_cast<size_t>(key_end - key_start));
-        url_decode_copy(val, sizeof(val), val_start, static_cast<size_t>(val_end - val_start));
-
         if((strcmp(key, "urls[]") == 0 || strcmp(key, "url") == 0 || strcmp(key, "urls") == 0) && val[0])
         {
             strncpy(entry->url, val, sizeof(entry->url) - 1);
@@ -575,8 +600,6 @@ static bool parse_webhook_form(const char* body, size_t body_len, struct WhEntry
         {
             parse_bool_text(val, &entry->active);
         }
-
-        if(p < end && *p == '&') p++;
     }
 
     return found_url;
@@ -586,32 +609,14 @@ static bool parse_webhook_form_urls(const char* body, size_t body_len,
                                     WhParsedUrl* urls, int* url_count,
                                     bool* saw_urls_key)
 {
-    const char* p = body;
-    const char* end = body + body_len;
+    struct FormParser fp = { body, body + body_len };
     *url_count = 0;
     *saw_urls_key = false;
 
-    while(p < end && *p)
+    char key[64];
+    char val[2048];
+    while(form_next(&fp, key, sizeof(key), val, sizeof(val)))
     {
-        const char* key_start = p;
-        while(p < end && *p && *p != '=' && *p != '&') p++;
-        const char* key_end = p;
-
-        const char* val_start = p;
-        const char* val_end = p;
-        if(p < end && *p == '=')
-        {
-            p++;
-            val_start = p;
-            while(p < end && *p && *p != '&') p++;
-            val_end = p;
-        }
-
-        char key[64];
-        char val[2048];
-        url_decode_copy(key, sizeof(key), key_start, static_cast<size_t>(key_end - key_start));
-        url_decode_copy(val, sizeof(val), val_start, static_cast<size_t>(val_end - val_start));
-
         if(strcmp(key, "urls[]") == 0 || strcmp(key, "url") == 0 || strcmp(key, "urls") == 0)
         {
             *saw_urls_key = true;
@@ -636,8 +641,6 @@ static bool parse_webhook_form_urls(const char* body, size_t body_len,
                 }
             }
         }
-
-        if(p < end && *p == '&') p++;
     }
 
     return *saw_urls_key;
@@ -678,10 +681,10 @@ static int next_numeric_id(void)
     return next;
 }
 
-/// Generate a unique ID (seconds-since-epoch based).
+/// Generate an ID unique among the currently-loaded webhooks, using a
+/// monotonically increasing in-process counter.
 static void gen_id(char* buf, size_t size)
 {
-    // Use PID + counter for uniqueness within this process lifetime.
     static int s_counter = 0;
 
     do
@@ -721,18 +724,12 @@ static char* handle_get_one(const char* id, size_t* resp_len)
     load_webhooks();
 
     int idx = find_webhook(id);
-    char* json = NULL;
+    char* json = nullptr;
 
     if(idx >= 0)
     {
-        // Serialize single webhook
         char buf[4096];
-        size_t off = 0;
-        off += snprintf(buf + off, sizeof(buf) - off,
-            "{\"id\":\"%s\",\"url\":\"%s\",\"encoding\":\"%s\",\"format\":\"%s\",\"active\":%s}",
-            g_webhooks[idx].id, g_webhooks[idx].url,
-            g_webhooks[idx].encoding, g_webhooks[idx].format,
-            g_webhooks[idx].active ? "true" : "false");
+        size_t off = serialize_entry(&g_webhooks[idx], buf, sizeof(buf));
         json = (char*)malloc(off + 1);
         if(json) { memcpy(json, buf, off + 1); *resp_len = off; }
     }
@@ -748,79 +745,97 @@ static char* handle_get_one(const char* id, size_t* resp_len)
     return json;
 }
 
-/// Handle POST /api/v2/user/webhooks (create webhook from body).
-static bool handle_post(const char* body, size_t body_len, char** out_json, size_t* out_len)
+/// POST with urls[] form fields: replace the entire webhook set with the posted
+/// URLs, preserving id/encoding/format of any URL that already existed. Returns
+/// false (without touching *out_json) when the body has no urls[] key, so the
+/// caller can fall back to the single-object path.
+static bool handle_post_url_set(const char* body, size_t body_len,
+                                char** out_json, size_t* out_len)
 {
-    WhParsedUrl urls[MAX_WEBHOOKS];
+    // Static (not stack): these two arrays are ~256 KB combined — far too large
+    // for a libc-interposed call frame. Held under g_wh_lock for the whole body,
+    // which also serialises the form parse against concurrent POSTs.
+    static WhParsedUrl urls[MAX_WEBHOOKS];
+    static struct WhEntry previous[MAX_WEBHOOKS];
+
+    pthread_mutex_lock(&g_wh_lock);
+
     int url_count = 0;
     bool saw_urls_key = false;
-    if(parse_webhook_form_urls(body, body_len, urls, &url_count, &saw_urls_key) && saw_urls_key)
+    parse_webhook_form_urls(body, body_len, urls, &url_count, &saw_urls_key);
+    if(!saw_urls_key)
     {
-        pthread_mutex_lock(&g_wh_lock);
-        load_webhooks();
-
-        struct WhEntry previous[MAX_WEBHOOKS];
-        const int previous_count = g_webhook_count;
-        memcpy(previous, g_webhooks, sizeof(previous));
-        const int first_new_id = next_numeric_id();
-
-        memset(g_webhooks, 0, sizeof(g_webhooks));
-        g_webhook_count = 0;
-        int next_id = first_new_id;
-
-        for(int i = 0; i < url_count; i++)
-        {
-            struct WhEntry* entry = &g_webhooks[g_webhook_count];
-
-            int old_idx = -1;
-            for(int x = 0; x < previous_count; x++)
-            {
-                if(previous[x].valid && strcmp(previous[x].url, urls[i].url) == 0)
-                {
-                    old_idx = x;
-                    break;
-                }
-            }
-
-            if(old_idx >= 0)
-            {
-                copy_string(entry->id, sizeof(entry->id), previous[old_idx].id);
-                copy_string(entry->encoding, sizeof(entry->encoding), previous[old_idx].encoding[0] ? previous[old_idx].encoding : "json");
-                copy_string(entry->format, sizeof(entry->format), previous[old_idx].format[0] ? previous[old_idx].format : "basic");
-            }
-            else
-            {
-                snprintf(entry->id, sizeof(entry->id), "%d", next_id++);
-                copy_string(entry->encoding, sizeof(entry->encoding), "json");
-                copy_string(entry->format, sizeof(entry->format), "basic");
-            }
-
-            copy_string(entry->url, sizeof(entry->url), urls[i].url);
-            entry->active = true;
-            entry->valid = true;
-            g_webhook_count++;
-        }
-
-        save_webhooks();
-        char* json = serialize_webhooks();
         pthread_mutex_unlock(&g_wh_lock);
+        return false;
+    }
 
-        refresh_webhook_manager();
+    load_webhooks();
 
-        if(!json)
+    const int previous_count = g_webhook_count;
+    memcpy(previous, g_webhooks, sizeof(previous));
+    const int first_new_id = next_numeric_id();
+
+    memset(g_webhooks, 0, sizeof(g_webhooks));
+    g_webhook_count = 0;
+    int next_id = first_new_id;
+
+    for(int i = 0; i < url_count; i++)
+    {
+        struct WhEntry* entry = &g_webhooks[g_webhook_count];
+
+        int old_idx = -1;
+        for(int x = 0; x < previous_count; x++)
         {
-            static const char empty[] = "[]";
-            *out_json = (char*)empty;
-            *out_len = strlen(empty);
-            return true;
+            if(previous[x].valid && strcmp(previous[x].url, urls[i].url) == 0)
+            {
+                old_idx = x;
+                break;
+            }
         }
 
-        *out_json = json;
-        *out_len = strlen(json);
+        if(old_idx >= 0)
+        {
+            copy_string(entry->id, sizeof(entry->id), previous[old_idx].id);
+            copy_string(entry->encoding, sizeof(entry->encoding), previous[old_idx].encoding[0] ? previous[old_idx].encoding : "json");
+            copy_string(entry->format, sizeof(entry->format), previous[old_idx].format[0] ? previous[old_idx].format : "basic");
+        }
+        else
+        {
+            snprintf(entry->id, sizeof(entry->id), "%d", next_id++);
+            copy_string(entry->encoding, sizeof(entry->encoding), "json");
+            copy_string(entry->format, sizeof(entry->format), "basic");
+        }
+
+        copy_string(entry->url, sizeof(entry->url), urls[i].url);
+        entry->active = true;
+        entry->valid = true;
+        g_webhook_count++;
+    }
+
+    save_webhooks();
+    char* json = serialize_webhooks();
+    pthread_mutex_unlock(&g_wh_lock);
+
+    refresh_webhook_manager();
+
+    if(!json)
+    {
+        static const char empty[] = "[]";
+        *out_json = (char*)empty;
+        *out_len = strlen(empty);
         return true;
     }
 
-    // Parse body as partial webhook object
+    *out_json = json;
+    *out_len = strlen(json);
+    return true;
+}
+
+/// POST with a single webhook object (JSON body or non-urls[] form): update the
+/// existing webhook matching the same URL, or create a new one.
+static bool handle_post_single(const char* body, size_t body_len,
+                               char** out_json, size_t* out_len)
+{
     struct WhEntry tmp;
     memset(&tmp, 0, sizeof(tmp));
     tmp.active = true; // default
@@ -855,15 +870,12 @@ static bool handle_post(const char* body, size_t body_len, char** out_json, size
         entry->active = tmp.active;
 
         save_webhooks();
+        char buf[4096];
+        size_t off = serialize_entry(entry, buf, sizeof(buf));
         pthread_mutex_unlock(&g_wh_lock);
 
         refresh_webhook_manager();
 
-        char buf[4096];
-        size_t off = snprintf(buf, sizeof(buf),
-            "{\"id\":\"%s\",\"url\":\"%s\",\"encoding\":\"%s\",\"format\":\"%s\",\"active\":%s}",
-            entry->id, entry->url, entry->encoding, entry->format,
-            entry->active ? "true" : "false");
         *out_json = (char*)malloc(off + 1);
         if(*out_json) memcpy(*out_json, buf, off + 1);
         *out_len = off;
@@ -891,20 +903,24 @@ static bool handle_post(const char* body, size_t body_len, char** out_json, size
     g_webhook_count++;
 
     save_webhooks();
+    char buf[4096];
+    size_t off = serialize_entry(entry, buf, sizeof(buf));
     pthread_mutex_unlock(&g_wh_lock);
 
     refresh_webhook_manager();
 
-    // Build response
-    char buf[4096];
-    size_t off = snprintf(buf, sizeof(buf),
-        "{\"id\":\"%s\",\"url\":\"%s\",\"encoding\":\"%s\",\"format\":\"%s\",\"active\":%s}",
-        entry->id, entry->url, entry->encoding, entry->format,
-        entry->active ? "true" : "false");
     *out_json = (char*)malloc(off + 1);
     if(*out_json) memcpy(*out_json, buf, off + 1);
     *out_len = off;
     return true;
+}
+
+/// Handle POST /api/v2/user/webhooks (create webhook from body).
+static bool handle_post(const char* body, size_t body_len, char** out_json, size_t* out_len)
+{
+    if(handle_post_url_set(body, body_len, out_json, out_len))
+        return true;
+    return handle_post_single(body, body_len, out_json, out_len);
 }
 
 /// Handle PUT /api/v2/user/webhooks/ID (update webhook).
@@ -942,16 +958,12 @@ static bool handle_put(const char* id, const char* body, size_t body_len,
     entry->active = tmp.active;
 
     save_webhooks();
+    char buf[4096];
+    size_t off = serialize_entry(entry, buf, sizeof(buf));
     pthread_mutex_unlock(&g_wh_lock);
 
     refresh_webhook_manager();
 
-    // Build response
-    char buf[4096];
-    size_t off = snprintf(buf, sizeof(buf),
-        "{\"id\":\"%s\",\"url\":\"%s\",\"encoding\":\"%s\",\"format\":\"%s\",\"active\":%s}",
-        entry->id, entry->url, entry->encoding, entry->format,
-        entry->active ? "true" : "false");
     *out_json = (char*)malloc(off + 1);
     if(*out_json) memcpy(*out_json, buf, off + 1);
     *out_len = off;
@@ -1009,7 +1021,7 @@ static char* build_http_response(int status_code, const char* status_text,
 
     size_t total = (size_t)(header_len > 0 ? header_len : 0) + body_len;
     char* resp = (char*)malloc(total + 1);
-    if(!resp) return NULL;
+    if(!resp) return nullptr;
 
     size_t off = 0;
     if(header_len > 0)
@@ -1106,7 +1118,7 @@ static size_t parse_content_length(const char* buf, size_t len)
     while(p < end)
     {
         // Look for "Content-Length:" or "content-length:"
-        const char* cl = NULL;
+        const char* cl = nullptr;
         if(end - p >= 16)
         {
             if((p[0]=='C'||p[0]=='c') && (p[1]=='o'||p[1]=='O') &&
@@ -1147,7 +1159,7 @@ static size_t parse_content_length(const char* buf, size_t len)
 }
 
 /// Find the double CRLF that separates headers from body.
-/// Returns pointer to start of body, or NULL if not found.
+/// Returns pointer to start of body, or nullptr if not found.
 static const char* find_body_start(const char* buf, size_t len)
 {
     for(size_t i = 0; i + 3 < len; i++)
@@ -1158,7 +1170,7 @@ static const char* find_body_start(const char* buf, size_t len)
             return buf + i + 4;
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 /// Parse an incoming HTTP request buffer and fill req_out.
@@ -1174,7 +1186,7 @@ static bool parse_request(const char* buf, size_t len, struct WhRequest* req_out
     if(req_out->path[0] == '\0') return false;
 
     // Check if it's a webhook path
-    if(strstr(req_out->path, "/api/v2/user/webhooks") == NULL)
+    if(strstr(req_out->path, "/api/v2/user/webhooks") == nullptr)
         return false;
 
     // Fix split method — PMS reads 1 byte on one thread and the rest on
@@ -1202,20 +1214,20 @@ static bool parse_request(const char* buf, size_t len, struct WhRequest* req_out
 }
 
 /// Extract the trailing ID from a path like /api/v2/user/webhooks/123.
-/// Returns pointer to ID string, or NULL if no ID segment.
+/// Returns pointer to ID string, or nullptr if no ID segment.
 static const char* extract_webhook_id(const char* path)
 {
     // NOTE: strlen("/api/v2/user/webhooks") == 21, NOT 22.
     static const size_t PREFIX_LEN = 21;
     const char* p = strstr(path, "/api/v2/user/webhooks");
-    if(!p) return NULL;
+    if(!p) return nullptr;
     p += PREFIX_LEN;
     if(*p == '/')
     {
         p++;
-        return (*p) ? p : NULL;
+        return (*p) ? p : nullptr;
     }
-    return NULL;
+    return nullptr;
 }
 
 // ── Common read-data processing (used by read/recv/recvfrom hooks) ─────────
@@ -1285,6 +1297,21 @@ static void on_fd_close_or_error(int fd)
     g_fds[fd].preamble_len = 0;
 }
 
+/// Shared body for the read/recv/recvfrom hooks: feed received bytes to the
+/// webhook detector, or reset FD state on EOF/error. `ret` is the underlying
+/// syscall's return value.
+static void track_fd_read(int fd, const void* buf, ssize_t ret)
+{
+    if(fd < 0 || fd >= MAX_FDS) return;
+
+    pthread_mutex_lock(&g_fd_lock);
+    if(ret > 0)
+        on_fd_data(fd, (const char*)buf, (size_t)ret);
+    else
+        on_fd_close_or_error(fd);
+    pthread_mutex_unlock(&g_fd_lock);
+}
+
 // ── Hook functions ─────────────────────────────────────────────────────────
 
 extern "C" ssize_t read(int fd, void* buf, size_t count)
@@ -1292,21 +1319,7 @@ extern "C" ssize_t read(int fd, void* buf, size_t count)
     if(!real_read) return syscall(SYS_read, fd, buf, count);
     ssize_t ret = real_read(fd, buf, count);
 
-    if(!g_handler_ready) return ret;
-
-    if(ret > 0 && fd >= 0 && fd < MAX_FDS)
-    {
-        pthread_mutex_lock(&g_fd_lock);
-        on_fd_data(fd, (const char*)buf, (size_t)ret);
-        pthread_mutex_unlock(&g_fd_lock);
-    }
-    else if(ret <= 0 && fd >= 0 && fd < MAX_FDS)
-    {
-        pthread_mutex_lock(&g_fd_lock);
-        on_fd_close_or_error(fd);
-        pthread_mutex_unlock(&g_fd_lock);
-    }
-
+    if(g_handler_ready) track_fd_read(fd, buf, ret);
     return ret;
 }
 
@@ -1315,21 +1328,7 @@ extern "C" ssize_t recv(int fd, void* buf, size_t len, int flags)
     if(!real_recv) return syscall(SYS_recvfrom, fd, buf, len, flags, nullptr, nullptr);
     ssize_t ret = real_recv(fd, buf, len, flags);
 
-    if(!g_handler_ready) return ret;
-
-    if(ret > 0 && fd >= 0 && fd < MAX_FDS)
-    {
-        pthread_mutex_lock(&g_fd_lock);
-        on_fd_data(fd, (const char*)buf, (size_t)ret);
-        pthread_mutex_unlock(&g_fd_lock);
-    }
-    else if(ret <= 0 && fd >= 0 && fd < MAX_FDS)
-    {
-        pthread_mutex_lock(&g_fd_lock);
-        on_fd_close_or_error(fd);
-        pthread_mutex_unlock(&g_fd_lock);
-    }
-
+    if(g_handler_ready) track_fd_read(fd, buf, ret);
     return ret;
 }
 
@@ -1339,21 +1338,7 @@ extern "C" ssize_t recvfrom(int fd, void* buf, size_t len, int flags,
     if(!real_recvfrom) return syscall(SYS_recvfrom, fd, buf, len, flags, src_addr, addrlen);
     ssize_t ret = real_recvfrom(fd, buf, len, flags, src_addr, addrlen);
 
-    if(!g_handler_ready) return ret;
-
-    if(ret > 0 && fd >= 0 && fd < MAX_FDS)
-    {
-        pthread_mutex_lock(&g_fd_lock);
-        on_fd_data(fd, (const char*)buf, (size_t)ret);
-        pthread_mutex_unlock(&g_fd_lock);
-    }
-    else if(ret <= 0 && fd >= 0 && fd < MAX_FDS)
-    {
-        pthread_mutex_lock(&g_fd_lock);
-        on_fd_close_or_error(fd);
-        pthread_mutex_unlock(&g_fd_lock);
-    }
-
+    if(g_handler_ready) track_fd_read(fd, buf, ret);
     return ret;
 }
 
@@ -1369,7 +1354,7 @@ static ssize_t serve_webhook_response(int fd, ssize_t requested_len)
     struct WhRequest* req = &g_fds[fd].req;
     const char* id = extract_webhook_id(req->path);
 
-    char* json = NULL;
+    char* json = nullptr;
     size_t json_len = 0;
     int status = 200;
     const char* status_text = "OK";
@@ -1383,7 +1368,7 @@ static ssize_t serve_webhook_response(int fd, ssize_t requested_len)
     else if(strcmp(req->method, "POST") == 0)
     {
         status = 201; status_text = "Created";
-        char* rj = NULL; size_t rl = 0;
+        char* rj = nullptr; size_t rl = 0;
         if(handle_post(req->body, req->body_len, &rj, &rl))
             { json = rj; json_len = rl; should_free = true; }
         else
@@ -1391,7 +1376,7 @@ static ssize_t serve_webhook_response(int fd, ssize_t requested_len)
     }
     else if(strcmp(req->method, "PUT") == 0)
     {
-        char* rj = NULL; size_t rl = 0;
+        char* rj = nullptr; size_t rl = 0;
         if(id && handle_put(id, req->body, req->body_len, &rj, &rl))
             { json = rj; json_len = rl; should_free = true; }
         else
@@ -1544,7 +1529,7 @@ static void* g_webhook_manager = nullptr;
 
 void webhook_set_sub_125E524(void* addr)
 {
-	_webhook_map_find = reinterpret_cast<decltype(_webhook_map_find)>(addr);
+    _webhook_map_find = reinterpret_cast<decltype(_webhook_map_find)>(addr);
 }
 
 void webhook_set_manager(void* manager)

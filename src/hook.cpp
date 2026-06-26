@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#ifndef __aarch64__
 #include "Zydis.h"
+#endif
 #include "webhook_handler.hpp"
 
 struct FeatureGuidEntry
@@ -216,6 +218,7 @@ TextSpan get_dottext_info()
 	return {true, text_start, text_end};
 }
 
+#ifndef __aarch64__
 OptAddr create_hook(uintptr_t from, uintptr_t to)
 {
 	ZydisDecoder decoder;
@@ -292,6 +295,117 @@ OptAddr create_hook(uintptr_t from, uintptr_t to)
 
 	return {true, reinterpret_cast<uintptr_t>(trampoline_mem)};
 }
+#endif // __aarch64__
+
+#ifdef __aarch64__
+// ARM64 hook: uses a 16-byte LDR X17, [PC, #8]; BR X17 trampoline.
+// ARM64 has fixed 4-byte instructions so we don't need Zydis to decode lengths.
+//
+// Hook injection (16 bytes at `from`):
+//   LDR X17, [PC, #8]   ; 4 bytes: load target address from literal pool
+//   BR X17               ; 4 bytes: jump to target
+//   <8 bytes target>     ; 8 bytes: literal pool with hook function address
+//
+// Trampoline (at least 28 bytes):
+//   16 bytes original instructions (4 × 4-byte)
+//   LDR X17, [PC, #8]   ; 4 bytes: load from+16 address
+//   BR X17               ; 4 bytes: jump back
+//   <8 bytes from+16>    ; 8 bytes: literal pool
+//
+static OptAddr create_hook_arm64(uintptr_t from, uintptr_t to)
+{
+	// Allocate a page for the trampoline.
+	auto tramp = static_cast<uint8_t*>(mmap(nullptr, getpagesize(),
+		PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0));
+	if(tramp == MAP_FAILED)
+		return {false, 0};
+
+	// Copy 16 bytes (4 ARM64 instructions) from the hook point.
+	memcpy(tramp, reinterpret_cast<void*>(from), 16);
+
+	// Append jump-back to original code past the hook point.
+	// LDR X17, [PC, #8]: offset = 8/4 = 2, encoding = 0x58000051
+	// BR X17: 0xD61F0220
+	const uint32_t ldr_x17 = 0x58000051; // LDR X17, [PC, #8]
+	const uint32_t br_x17  = 0xD61F0220; // BR X17
+
+	memcpy(tramp + 16, &ldr_x17, 4);
+	memcpy(tramp + 20, &br_x17,  4);
+	*reinterpret_cast<uintptr_t*>(tramp + 24) = from + 16;
+
+	const size_t tramp_size = 32; // 16 copied + 16 jump = 32
+
+	if(mprotect(tramp, getpagesize(), PROT_READ|PROT_EXEC) != 0)
+	{
+		munmap(tramp, getpagesize());
+		return {false, 0};
+	}
+
+	// Make the hook point writable.
+	const uintptr_t from_page = from & ~(static_cast<uintptr_t>(getpagesize()) - 1);
+	if(mprotect(reinterpret_cast<void*>(from_page), getpagesize(),
+		PROT_READ|PROT_WRITE|PROT_EXEC) != 0)
+	{
+		munmap(tramp, getpagesize());
+		return {false, 0};
+	}
+
+	// Write the hook: LDR X17, [PC, #8]; BR X17; <8-byte target addr>
+	memcpy(reinterpret_cast<void*>(from),      &ldr_x17, 4);
+	memcpy(reinterpret_cast<void*>(from + 4),  &br_x17,  4);
+	*reinterpret_cast<uintptr_t*>(from + 8) = to;
+
+	// Flush instruction cache (required on ARM64 for modified code).
+	__builtin___clear_cache(reinterpret_cast<char*>(from),
+	                        reinterpret_cast<char*>(from) + 16);
+	__builtin___clear_cache(reinterpret_cast<char*>(tramp),
+	                        reinterpret_cast<char*>(tramp) + tramp_size);
+
+	// Restore text page to read-execute.
+	mprotect(reinterpret_cast<void*>(from_page), getpagesize(), PROT_READ|PROT_EXEC);
+
+	return {true, reinterpret_cast<uintptr_t>(tramp)};
+}
+
+// ARM64 hook callbacks.
+
+// Hook for the feature-check function (SSO-check prologue on x1 or x0).
+// On ARM64, functions matching `ldrb w?, [x?, #0x17]` are candidate
+// feature checkers.  We return `true` to mark every feature as available.
+// Currently unimplemented — we discover targets by sig_scan below.
+// (The actual callback is chosen based on which signature matched.)
+
+// Bitset lock — same as x86-64: force all 14 slots to UINT64_MAX.
+// The ARM64 FeatureManager still uses the same std::bitset<896> layout.
+// We locate the feature flags pointer by scanning for LDR+DUP+STP pattern
+// that addresses the global bitset, similar to the lea-rel32 on x86-64.
+
+// ARM64 hook that forces all feature bits on after initialization.
+static uint64_t (*_arm64_bitset_init)(uintptr_t) = nullptr;
+static uint64_t (*_arm64_feature_check)(uintptr_t, uintptr_t) = nullptr;
+static uintptr_t g_arm64_feature_flags = 0;
+
+static uint64_t hook_arm64_bitset_init(uintptr_t rcx)
+{
+	auto ret = _arm64_bitset_init(rcx);
+
+	if(g_arm64_feature_flags != 0)
+	{
+		// Force all 14 × uint64_t feature slots on.
+		for(int i = 0; i < 14; i++)
+			reinterpret_cast<uint64_t*>(g_arm64_feature_flags)[i] = UINT64_MAX;
+	}
+
+	return ret;
+}
+
+// Generic feature-check interceptor: return true for any feature.
+static uint64_t hook_arm64_feature_check(uintptr_t a, uintptr_t b)
+{
+	(void)a; (void)b;
+	return 1; // feature available
+}
+#endif // __aarch64__
 
 OptAddr sig_scan(uintptr_t start, uintptr_t end, const char* pattern)
 {
@@ -445,6 +559,141 @@ void hook()
 
 	const uintptr_t start = info.start;
 	const uintptr_t end = info.end;
+
+#ifdef __aarch64__
+	// ── ARM64 hook targets ──────────────────────────────────────────────
+	//
+	// Use signatures extracted from the ARM64 Plex binary analysis
+	// (get_arm64_sigs.py output).  The binary has no fixed addresses; all
+	// targets are found by byte-pattern scanning.
+	//
+	// Strategy:
+	//   1. Hook the preference init function (identified by "WebHooksEnabled"
+	//      ADRP+ADD reference) to force the preference on.
+	//   2. Hook feature-check functions (identified by SSO prologue near
+	//      hasPlexPass string references) to return true.
+	//   3. If a global feature-bitset is discoverable, force all slots on.
+
+	// STEP A1: Feature bitset — scan for LDR + DUP + STP pattern that
+	// references the global feature flags array.
+	//
+	// The ARM64 binary still uses std::bitset<896> = 14 × uint64_t.
+	// We look for a LDR (literal load of a global address) followed by a
+	// DUP that broadcasts a feature slot index, followed by an AND/ANDS
+	// test instruction — the same check_feature pattern on ARM64.
+	//
+	// Pattern: LDR Xt, #page (ADRP) / page-offset-of-g_feature_flags (ADD)
+	// or a global pointer LDR via literal pool.
+	//
+	// If found, hook the first FeatureManager init function we can sig_scan
+	// and force all bits on after init.
+
+	// Try to find the feature flags array by scanning for a function that
+	// loads from a single global pointer (the bitset) in a loop-like pattern.
+	// The ARM64 equivalent of the x86-64 `lea rcx, [rip+?]` pattern is an
+	// ADRP+ADD sequence.
+	//
+	// We use a heuristic: look for ADRP X0, #page ; ADD X0, X0, #off immediately
+	// followed by a BL call — this is a common pattern for passing the bitset
+	// address to FeatureManager functions.
+	if(const auto fflags_sig = sig_scan(start, end,
+		"00 00 00 90 ?? ?? ?? 91 ?? ?? ?? 94"); fflags_sig.ok)
+	{
+		// fflags_sig.addr points to: ADRP X0, #page
+		// Decode: ADRP X0, #page @ fflags_sig.addr => base = page
+		// ADD  X0, X0, #off  @ fflags_sig.addr + 4 => addr = page + off
+		//
+		// ARM64 ADRP encoding:
+		//   |31|29|28|24|23| 5|4|0|
+		//   |1   immlo| 10000 | immhi| Rd|
+		//   imm = immlo:immhi (21-bit signed, shifted by 12)
+		//
+		// ARM64 ADD (immediate) encoding:
+		//   |31|24|23|22|21|   10  |9|5|4|0|
+		//   |10010001|sh|   imm12  |Rn| Rd|
+		//
+		// Extract ADRP immediate:
+		const uint32_t adrp_inst = *reinterpret_cast<const uint32_t*>(fflags_sig.addr);
+		const uint32_t adrp_immlo = (adrp_inst >> 29) & 3;
+		const uint32_t adrp_immhi = (adrp_inst >> 5) & 0x7FFFF;
+		int64_t adrp_imm = (static_cast<int64_t>((adrp_immlo << 19) | adrp_immhi) << 43) >> 43;
+		const uintptr_t adrp_page = (fflags_sig.addr & ~0xFFFULL) + adrp_imm;
+
+		// Extract ADD immediate:
+		const uint32_t add_inst = *reinterpret_cast<const uint32_t*>(fflags_sig.addr + 4);
+		const uint32_t add_imm12 = (add_inst >> 10) & 0xFFF;
+		const uintptr_t flags_addr = adrp_page + add_imm12;
+
+		g_arm64_feature_flags = flags_addr;
+	}
+
+	// Try to find and hook a FeatureManager init function.
+	// ARM64 FeatureManager functions have a large stack frame (many stp pairs).
+	// We look for the prologue with 6+ stp pairs (12+ register saves).
+	if(g_arm64_feature_flags || true) // always try
+	{
+		// Signature from the FeatureManager constructor-like function at ~0x658070:
+		// stp x29, x30, [sp, #-0x30]! ; stp x20, x19, [sp, #0x10] ; ...
+		if(const auto fm = sig_scan(start, end,
+			"FD 7B 03 A9 F4 4F 04 A9 FD C3 00 91"); fm.ok)
+		{
+			if(auto tramp = create_hook_arm64(fm.addr,
+				reinterpret_cast<uintptr_t>(hook_arm64_bitset_init)); tramp.ok)
+			{
+				_arm64_bitset_init = reinterpret_cast<decltype(_arm64_bitset_init)>(tramp.addr);
+			}
+		}
+	}
+
+	// STEP A2: Feature-check function — candidate with SSO-check prologue.
+	// The function at ~0xeba0b4 reads [x0+0x17] (std::string SSO byte) and
+	// compares against known feature strings.  Hooking it to always return
+	// true unlocks features regardless of the bitset.
+	//
+	// Signature: FD 7B BE A9 F3 0B 00 F9 FD 03 00 91 08 5C 40 39
+	// (stp x29,x30,[sp,#-0x10]!; str x19,[sp,#8]; mov x29,sp; ldrb w8,[x0,#0x17])
+	if(const auto fc = sig_scan(start, end,
+		"FD 7B BE A9 F3 0B 00 F9 FD 03 00 91 08 5C 40 39"); fc.ok)
+	{
+		if(auto tramp = create_hook_arm64(fc.addr,
+			reinterpret_cast<uintptr_t>(hook_arm64_feature_check)); tramp.ok)
+		{
+			_arm64_feature_check = reinterpret_cast<decltype(_arm64_feature_check)>(tramp.addr);
+		}
+	}
+
+	// STEP A3: Preference init — the function that stores "WebHooksEnabled"
+	// during startup.  Hook it so we can force the default to "1" after init.
+	//
+	// Signature (from 0x10dd904): 6 stp pairs + mov x29, sp + sub sp, sp, #0x250
+	// FD 7B BA A9 FC 6F 01 A9 FA 67 02 A9 F8 5F 03 A9 F6 57 04 A9 F4 4F 05 A9
+	// FD 03 00 91 FF 43 09 D1
+	//
+	// Delay implementation until ARM64 build is verified on target.
+	// TODO: Implement after verifying feature unlock works.
+
+	// STEP A4: WebHooksEnabled preference getter — find by SSO-check on x1 (2nd arg).
+	// Pattern: `?? 5C 40 39` where ?? encodes register w? and x1 base register.
+	// ldrb w8, [x1, #0x17] = 0x39400000 | (0x17 << 10) | (1 << 5) | 8 = 0x39405C28
+	// ldrb w9, [x1, #0x17] = 0x39405C29
+	// etc. We use a wildcard for the destination register.
+	//
+	// The surrounding prologue should also save multiple callee-saved registers.
+	if(const auto wh = sig_scan(start, end,
+		"FD 7B ?? A9 ?? ?? ?? A9 FD 03 00 91 ?? 5C 40 39 ??"); wh.ok)
+	{
+		if(auto tramp = create_hook_arm64(wh.addr,
+			reinterpret_cast<uintptr_t>(hook_arm64_feature_check)); tramp.ok)
+		{
+			// Same callback as feature check for now — returns true for any
+			// getter call.  TODO: implement string-key matching like x86-64.
+			_arm64_feature_check = reinterpret_cast<decltype(_arm64_feature_check)>(tramp.addr);
+		}
+	}
+
+	// ARM64 hook complete.
+	return;
+#endif
 
 	// STEP 1: sub_122B2F2 (the generic preference getter): force WebHooksEnabled.
 	if(const auto wh = sig_scan(start, end,
